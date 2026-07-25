@@ -78,8 +78,6 @@ Users running an older version will be notified automatically and can jump strai
 
 ## License
 
-Add your preferred license here.
-
 ## Author
 
 **Tryppy** — [github.com/TRYPWiRE](https://github.com/TRYPWiRE)

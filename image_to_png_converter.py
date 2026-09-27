@@ -481,7 +481,7 @@ def installed_components():
 
 
 APP_TITLE = "ImageGen"
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.11.0"
 
 # Update checking - looks at GitHub Releases for this repo. Create releases
 # there with tags like "v1.1.0" and this will detect anything newer than
@@ -9860,13 +9860,74 @@ def generation_device_description():
     return "CPU only — expect minutes per image rather than seconds"
 
 
-def huggingface_token():
-    """A saved token, falling back to the standard environment variables so
-    an existing Hugging Face login keeps working."""
+HF_TOKEN_FILENAME = "hf_token.txt"
+
+# The token typed into the box this session, remembered or not.
+_session_hf_token = ""
+
+
+def user_data_folder():
+    """A per-user folder that's always writable, unlike Program Files."""
+    base = os.environ.get("APPDATA") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return os.path.join(base, APP_TITLE)
+
+
+def hf_token_path():
+    return os.path.join(user_data_folder(), HF_TOKEN_FILENAME)
+
+
+def load_remembered_hf_token():
+    """The token saved with the Remember button, or ""."""
+    try:
+        with open(hf_token_path(), encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        pass
+    # Older versions saved it in the app settings; move it to the file.
     settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-    saved = (settings.value("hf_token", "") or "").strip()
-    return saved or os.environ.get("HF_TOKEN", "") or os.environ.get(
-        "HUGGING_FACE_HUB_TOKEN", "")
+    old = (settings.value("hf_token", "") or "").strip()
+    if old:
+        try:
+            remember_hf_token(old)
+            settings.remove("hf_token")
+        except OSError:
+            pass
+    return old
+
+
+def remember_hf_token(token):
+    """Writes the token to a file in the user's own folder, readable only
+    by them where the system supports it."""
+    os.makedirs(user_data_folder(), exist_ok=True)
+    path = hf_token_path()
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(token.strip())
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def forget_hf_token():
+    try:
+        os.remove(hf_token_path())
+    except OSError:
+        pass
+    QSettings(SETTINGS_ORG, SETTINGS_APP).remove("hf_token")
+
+
+def set_session_hf_token(token):
+    global _session_hf_token
+    _session_hf_token = (token or "").strip()
+
+
+def huggingface_token():
+    """The token in the box, then the remembered one, then the standard
+    environment variables so an existing Hugging Face login keeps working."""
+    return (_session_hf_token or load_remembered_hf_token()
+            or os.environ.get("HF_TOKEN", "")
+            or os.environ.get("HUGGING_FACE_HUB_TOKEN", ""))
 
 
 class ModelAccessError(Exception):
@@ -9920,6 +9981,8 @@ def check_model_access(model_id):
             "\"Read\" type is enough.\n"
             "4. Paste it into the HF token box in this tab's settings, then "
             "try again.\n\n"
+            "The \"How to get a token\" button next to that box walks "
+            "through these steps with clickable links.\n\n"
             "Or pick SDXL or SD Turbo, which need none of this."
         ) from None
     except RepositoryNotFoundError:
@@ -10196,6 +10259,132 @@ class ReferenceList(QListWidget):
         event.acceptProposedAction()
 
 
+class HFTokenGuideDialog(QDialog):
+    """Step-by-step help for getting a Hugging Face token. Each step's link
+    opens in the browser and ticks the step off, so it's easy to see where
+    you got to."""
+
+    LINK_COLOUR = "#9d7bff"
+    TICK_COLOUR = "#2ecc71"
+    # Steps already done this session, kept across re-openings.
+    done_steps = set()
+
+    def __init__(self, tab, model_id):
+        super().__init__(tab)
+        self.tab = tab
+        self.setWindowTitle("How to get a Hugging Face token")
+        # A fixed width lets the wrapped steps work out their full height.
+        self.setFixedWidth(560)
+        model_id = model_id or "black-forest-labs/FLUX.1-schnell"
+        model_page = f"https://huggingface.co/{model_id}"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        intro = QLabel(
+            "Some models, including both FLUX.1 models and SD 3.5, are free "
+            "but only download once you've accepted their terms and given "
+            "the app a token. It takes a couple of minutes, once."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        steps = [
+            ("account", "Sign in, or make a free account, at "
+             "{link}.", "https://huggingface.co/login", "huggingface.co"),
+            ("terms", "Open {link} and accept the terms at the top of the "
+             "page (\"Agree and access repository\").", model_page,
+             f"the {model_id} page"),
+            ("token", "Create a token at {link}. Click \"Create new token\", "
+             "pick the \"Read\" type and copy it.",
+             "https://huggingface.co/settings/tokens",
+             "huggingface.co/settings/tokens"),
+        ]
+        self.ticks = {}
+        for number, (key, text, url, link_text) in enumerate(steps, start=1):
+            link = (f'<a href="{url}" style="color:{self.LINK_COLOUR};">'
+                    f'{link_text}</a>')
+            layout.addLayout(self._step_row(
+                key, number, text.format(link=link), url))
+
+        # Step 4 has no link - it's done here, by pasting the token in.
+        paste_row = self._step_row(
+            "paste", 4, "Paste the token below and press Remember, so the app "
+            "keeps it for next time.", None)
+        layout.addLayout(paste_row)
+
+        token_row = QHBoxLayout()
+        token_row.setContentsMargins(34, 0, 0, 0)
+        token_row.setSpacing(8)
+        self.token_edit = QLineEdit(tab.token_edit.text())
+        self.token_edit.setEchoMode(QLineEdit.Password)
+        self.token_edit.setPlaceholderText("hf_…")
+        token_row.addWidget(self.token_edit, 1)
+        remember_button = QPushButton("Remember")
+        remember_button.setObjectName("ConvertButton")
+        remember_button.setCursor(Qt.PointingHandCursor)
+        remember_button.clicked.connect(self.remember)
+        token_row.addWidget(remember_button)
+        layout.addLayout(token_row)
+
+        layout.addStretch(1)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        close_button = QPushButton("Close")
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        if load_remembered_hf_token():
+            self.done_steps.add("paste")
+        for key in self.done_steps:
+            if key in self.ticks:
+                self.ticks[key].setText("\u2714")
+        self.resize(self.width(), self.heightForWidth(self.width()))
+
+    def _step_row(self, key, number, html, url):
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        tick = QLabel("")
+        tick.setFixedSize(22, 22)
+        tick.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        tick.setStyleSheet(
+            f"color: {self.TICK_COLOUR}; font-size: 16px; font-weight: bold;")
+        tick.setToolTip("Done")
+        self.ticks[key] = tick
+        row.addWidget(tick, 0, Qt.AlignTop)
+        text = QLabel(f"<b>{number}.</b> {html}")
+        text.setTextFormat(Qt.RichText)
+        text.setWordWrap(True)
+        text.setOpenExternalLinks(False)
+        text.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        if url:
+            text.linkActivated.connect(
+                lambda link, step=key: self.open_step(step, link))
+        row.addWidget(text, 1)
+        return row
+
+    def mark_done(self, key):
+        self.done_steps.add(key)
+        self.ticks[key].setText("\u2714")
+
+    def open_step(self, key, url):
+        QDesktopServices.openUrl(QUrl(url))
+        self.mark_done(key)
+
+    def remember(self):
+        token = self.token_edit.text().strip()
+        if not token:
+            self.token_edit.setFocus()
+            return
+        self.tab.token_edit.setText(token)
+        if self.tab.remember_token():
+            self.mark_done("paste")
+
+
 class ImageCreationTab(QWidget):
     """Describe a picture, optionally hand it reference images, and generate
     it locally."""
@@ -10220,9 +10409,9 @@ class ImageCreationTab(QWidget):
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(14)
+        panel_layout.addWidget(self._build_settings_group())
         panel_layout.addWidget(self._build_prompt_group())
         panel_layout.addWidget(self._build_reference_group())
-        panel_layout.addWidget(self._build_settings_group())
         panel_layout.addStretch()
 
         scroll = QScrollArea()
@@ -10494,11 +10683,38 @@ class ImageCreationTab(QWidget):
         return box
 
     def _build_settings_group(self):
-        box = QGroupBox("Settings")
-        grid = QGridLayout(box)
-        grid.setContentsMargins(16, 16, 16, 16)
+        """Settings fold away behind a header so they don't crowd the
+        panel. The header carries a badge saying whether a token is still
+        needed, which is the one thing most people have to come here for."""
+        section = QWidget()
+        outer = QVBoxLayout(section)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
+
+        self.settings_header = QPushButton()
+        self.settings_header.setCheckable(True)
+        self.settings_header.setCursor(Qt.PointingHandCursor)
+        self.settings_header.setMinimumHeight(44)
+        self.settings_header.setToolTip("Model, size and your Hugging Face token")
+        self.settings_header.setStyleSheet(
+            "QPushButton { text-align: left; padding: 10px 14px; "
+            "font-weight: bold; font-size: 14px; border-radius: 10px; "
+            "border: 2px solid #9d7bff; background-color: rgba(157,123,255,0.14); }"
+            "QPushButton:hover { background-color: rgba(157,123,255,0.26); }"
+        )
+        self.settings_header.toggled.connect(self._toggle_settings)
+        outer.addWidget(self.settings_header)
+
+        box = QFrame()
+        box.setObjectName("ImageCard")
+        self.settings_body = box
+        body = QVBoxLayout(box)
+        body.setContentsMargins(16, 16, 16, 16)
+        body.setSpacing(14)
+        grid = QGridLayout()
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
+        body.addLayout(grid)
 
         grid.addWidget(QLabel("Model"), 0, 0)
         self.model_combo = QComboBox()
@@ -10522,7 +10738,7 @@ class ImageCreationTab(QWidget):
         self.model_note = QLabel("")
         self.model_note.setObjectName("HintLabel")
         self.model_note.setWordWrap(True)
-        grid.addWidget(self.model_note, 6, 0, 1, 4)
+        grid.addWidget(self.model_note, 5, 0, 1, 4)
 
         grid.addWidget(QLabel("Size"), 2, 0)
         self.size_combo = QComboBox()
@@ -10545,26 +10761,12 @@ class ImageCreationTab(QWidget):
         )
         grid.addWidget(self.guidance_spin, 3, 3)
 
-        grid.addWidget(QLabel("HF token"), 4, 0)
-        self.token_edit = QLineEdit()
-        self.token_edit.setEchoMode(QLineEdit.Password)
-        self.token_edit.setPlaceholderText("needed for FLUX.1 and SD 3.5")
-        self.token_edit.setToolTip(
-            "Some models are behind a licence you accept on their page, and "
-            "then need an access token to download.\n"
-            "Create one at huggingface.co/settings/tokens - read access is enough."
-        )
-        self.token_edit.setText(QSettings(SETTINGS_ORG, SETTINGS_APP)
-                                .value("hf_token", "") or "")
-        self.token_edit.editingFinished.connect(self._save_token)
-        grid.addWidget(self.token_edit, 4, 1, 1, 3)
-
-        grid.addWidget(QLabel("Seed"), 5, 0)
+        grid.addWidget(QLabel("Seed"), 4, 0)
         self.seed_spin = QSpinBox()
         self.seed_spin.setRange(-1, 2_147_483_647)
         self.seed_spin.setValue(-1)
         self.seed_spin.setToolTip("-1 picks a new random seed each time.")
-        grid.addWidget(self.seed_spin, 5, 1)
+        grid.addWidget(self.seed_spin, 4, 1)
         self.reuse_seed_button = QPushButton("Reuse last")
         self.reuse_seed_button.setObjectName("ChipButton")
         self.reuse_seed_button.setCursor(Qt.PointingHandCursor)
@@ -10574,15 +10776,132 @@ class ImageCreationTab(QWidget):
         )
         self.reuse_seed_button.clicked.connect(self.reuse_last_seed)
         self.reuse_seed_button.setEnabled(False)
-        grid.addWidget(self.reuse_seed_button, 5, 2, 1, 2)
+        grid.addWidget(self.reuse_seed_button, 4, 2, 1, 2)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
-        self._model_changed(self.model_combo.currentText())
-        return box
 
-    def _save_token(self):
-        QSettings(SETTINGS_ORG, SETTINGS_APP).setValue(
-            "hf_token", self.token_edit.text().strip())
+        # The token gets its own highlighted how-to box, since it's the step
+        # people miss.
+        token_box = QFrame()
+        token_box.setObjectName("TokenBox")
+        token_box.setStyleSheet(
+            "QFrame#TokenBox { border: 2px solid #9d7bff; border-radius: 10px; "
+            "background-color: rgba(157,123,255,0.10); }"
+            "QFrame#TokenBox QLabel { background: transparent; border: none; }"
+        )
+        token_layout = QVBoxLayout(token_box)
+        token_layout.setContentsMargins(14, 12, 14, 12)
+        token_layout.setSpacing(8)
+        token_title = QLabel("\U0001F511  <b>Hugging Face token</b>")
+        token_title.setTextFormat(Qt.RichText)
+        token_layout.addWidget(token_title)
+        token_hint = QLabel(
+            "FLUX.1 and SD 3.5 won't download without one. It's free and "
+            "takes a couple of minutes, once: press \"How to get a token\" "
+            "for the steps, paste it here and press Remember."
+        )
+        token_hint.setWordWrap(True)
+        token_layout.addWidget(token_hint)
+
+        token_row = QHBoxLayout()
+        token_row.setSpacing(8)
+        self.token_edit = QLineEdit()
+        self.token_edit.setEchoMode(QLineEdit.Password)
+        self.token_edit.setPlaceholderText("paste your token here (hf_…)")
+        self.token_edit.setToolTip(
+            "Some models are behind a licence you accept on their page, and "
+            "then need an access token to download.\n"
+            "Press \"How to get a token\" for the steps."
+        )
+        self.token_edit.setText(load_remembered_hf_token())
+        set_session_hf_token(self.token_edit.text())
+        self.token_edit.textChanged.connect(self._token_edited)
+        token_row.addWidget(self.token_edit, 1)
+        self.remember_token_button = QPushButton("Remember")
+        self.remember_token_button.setObjectName("ChipButton")
+        self.remember_token_button.setCursor(Qt.PointingHandCursor)
+        self.remember_token_button.clicked.connect(self._remember_clicked)
+        token_row.addWidget(self.remember_token_button)
+        token_layout.addLayout(token_row)
+
+        self.token_help_button = QPushButton("\u24d8  How to get a token")
+        self.token_help_button.setObjectName("ConvertButton")
+        self.token_help_button.setCursor(Qt.PointingHandCursor)
+        self.token_help_button.setToolTip(
+            "Step-by-step help for getting the free token FLUX.1 needs.")
+        self.token_help_button.clicked.connect(self.show_token_guide)
+        token_layout.addWidget(self.token_help_button)
+        body.addWidget(token_box)
+        outer.addWidget(box)
+
+        self._model_changed(self.model_combo.currentText())
+        self._update_remember_button()
+        # Start folded away, unless there's no token yet - then open, so
+        # the how-to box is the first thing seen.
+        self.settings_header.setChecked(not load_remembered_hf_token())
+        self._toggle_settings(self.settings_header.isChecked())
+        return section
+
+    def _toggle_settings(self, open_):
+        self.settings_body.setVisible(open_)
+        self._update_settings_header()
+
+    def _update_settings_header(self):
+        arrow = "\u25BE" if self.settings_header.isChecked() else "\u25B8"
+        if huggingface_token():
+            badge = "\u2714 token set"
+        else:
+            badge = "\u26A0 token needed for FLUX.1"
+        action = "hide" if self.settings_header.isChecked() else "click to open"
+        self.settings_header.setText(
+            f"{arrow}   \u2699  Settings   \u00b7   {badge}   ({action})")
+
+    def _token_edited(self, text):
+        set_session_hf_token(text)
+        self._update_remember_button()
+        self._update_settings_header()
+
+    def _update_remember_button(self):
+        token = self.token_edit.text().strip()
+        remembered = bool(token) and token == load_remembered_hf_token()
+        self.remember_token_button.setText(
+            "Forget" if remembered else "Remember")
+        self.remember_token_button.setEnabled(bool(token) or remembered)
+        self.remember_token_button.setToolTip(
+            "Deletes the saved token from this PC." if remembered else
+            "Saves the token on this PC so it's filled in next time.")
+
+    def _remember_clicked(self):
+        if self.remember_token_button.text() == "Forget":
+            forget_hf_token()
+            self.token_edit.clear()
+            self.status_label.setText("Token forgotten.")
+            self._update_remember_button()
+        else:
+            self.remember_token()
+
+    def remember_token(self):
+        """Saves the token in the box to a file. True if it worked."""
+        token = self.token_edit.text().strip()
+        if not token:
+            return False
+        try:
+            remember_hf_token(token)
+        except OSError as exc:
+            show_error(self, "Couldn't save the token",
+                       f"The token couldn't be written to {hf_token_path()}."
+                       f"\n\n{exc}")
+            return False
+        set_session_hf_token(token)
+        self._update_remember_button()
+        self.status_label.setText("Token remembered for next time.")
+        return True
+
+    def show_token_guide(self):
+        model_id, _family = self._selected_model()
+        if not model_id or os.path.isdir(model_id):
+            model_id = "black-forest-labs/FLUX.1-schnell"
+        HFTokenGuideDialog(self, model_id).exec()
 
     def _model_changed(self, label):
         model = GENERATION_MODELS[label]

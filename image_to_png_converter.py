@@ -88,6 +88,8 @@ import shutil
 import tempfile
 import threading
 import json
+import platform
+import traceback
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
@@ -198,6 +200,7 @@ from PyQt6.QtWidgets import (
     QTabBar,
     QLayout,
     QBoxLayout,
+    QStyle,
 )
 
 # Qt WebEngine powers the "Web Images" tab's embedded browser. It ships as a
@@ -478,7 +481,7 @@ def installed_components():
 
 
 APP_TITLE = "ImageGen"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 
 # Update checking - looks at GitHub Releases for this repo. Create releases
 # there with tags like "v1.1.0" and this will detect anything newer than
@@ -505,6 +508,133 @@ def _parse_version(version_string):
     while len(parts) < 3:
         parts.append(0)
     return tuple(parts[:3])
+
+
+# ---------------------------------------------------------------------------
+# Error reporting
+#
+# Every error the app shows goes through show_error(), which has a "Copy
+# error" button. It copies a report with the app version, system and the
+# full error, ready to paste into a message.
+# ---------------------------------------------------------------------------
+
+def error_report(title, message, details=""):
+    lines = [
+        f"{APP_TITLE} v{APP_VERSION} error report",
+        f"Time: {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"System: {platform.platform()}",
+        f"Python: {platform.python_version()}"
+        f"{' (built exe)' if getattr(sys, 'frozen', False) else ''}",
+        f"Extensions: {', '.join(sorted(installed_extension_ids())) or 'none'}",
+        "",
+        f"Title: {title}",
+        "",
+        str(message).strip(),
+    ]
+    if details:
+        lines += ["", "Details:", str(details).rstrip()]
+    return "\n".join(lines)
+
+
+class ErrorDialog(QDialog):
+    """A warning box whose contents can be copied with one click."""
+
+    def __init__(self, parent, title, message, details="", critical=False):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(460)
+        self.report = error_report(title, message, details)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        top = QHBoxLayout()
+        top.setSpacing(14)
+        icon = QLabel()
+        standard = (QStyle.StandardPixmap.SP_MessageBoxCritical if critical
+                    else QStyle.StandardPixmap.SP_MessageBoxWarning)
+        icon.setPixmap(self.style().standardIcon(standard).pixmap(40, 40))
+        icon.setAlignment(Qt.AlignTop)
+        top.addWidget(icon)
+        text = QLabel(str(message))
+        text.setWordWrap(True)
+        text.setTextFormat(Qt.PlainText)
+        text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        top.addWidget(text, 1)
+        layout.addLayout(top)
+
+        if details:
+            box = QPlainTextEdit(str(details))
+            box.setReadOnly(True)
+            box.setMinimumHeight(140)
+            layout.addWidget(box)
+
+        buttons = QHBoxLayout()
+        self.copy_button = QPushButton("Copy error")
+        self.copy_button.setCursor(Qt.PointingHandCursor)
+        self.copy_button.setToolTip(
+            "Copies the error and some details about your system, so you "
+            "can paste it into a message.")
+        self.copy_button.clicked.connect(self.copy_report)
+        buttons.addWidget(self.copy_button)
+        buttons.addStretch()
+        ok_button = QPushButton("OK")
+        ok_button.setObjectName("ConvertButton")
+        ok_button.setCursor(Qt.PointingHandCursor)
+        ok_button.setDefault(True)
+        ok_button.clicked.connect(self.accept)
+        buttons.addWidget(ok_button)
+        layout.addLayout(buttons)
+
+    def copy_report(self):
+        QApplication.clipboard().setText(self.report)
+        self.copy_button.setText("Copied!")
+        QTimer.singleShot(1500, lambda: self.copy_button.setText("Copy error"))
+
+
+def show_error(parent, title, message, details="", critical=False):
+    """Drop-in for QMessageBox.warning/critical, with a Copy error button."""
+    ErrorDialog(parent, title, message, details, critical).exec()
+    return QMessageBox.Ok
+
+
+def show_critical(parent, title, message, details=""):
+    return show_error(parent, title, message, details, critical=True)
+
+
+class _ErrorRelay(QObject):
+    """Carries errors from any thread to the GUI thread."""
+    raised = pyqtSignal(str, str)
+
+
+_error_relay = None
+
+
+def install_error_hooks():
+    """Shows anything that would otherwise crash silently in a copyable box."""
+    global _error_relay
+    _error_relay = _ErrorRelay()
+    _error_relay.raised.connect(lambda message, details: show_error(
+        QApplication.activeWindow(), "Something went wrong",
+        f"{APP_TITLE} hit an unexpected error:\n\n{message}\n\n"
+        "Copy the error and send it over so it can be fixed.",
+        details=details, critical=True))
+
+    def report(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        details = "".join(traceback.format_exception(exc_type, exc, tb))
+        sys.stderr.write(details)
+        try:
+            _error_relay.raised.emit(f"{exc_type.__name__}: {exc}", details)
+        except Exception:  # noqa: BLE001
+            pass
+
+    sys.excepthook = report
+    threading.excepthook = lambda args: report(
+        args.exc_type, args.exc_value, args.exc_traceback)
 
 
 MAX_FILES = 10
@@ -2684,7 +2814,7 @@ class VideoToGifTab(QWidget):
             clip.close()
         except Exception as exc:  # noqa: BLE001
             self._log(f"ERROR opening {os.path.basename(path)}: {exc}")
-            QMessageBox.warning(self, "Couldn't open video", str(exc))
+            show_error(self, "Couldn't open video", str(exc))
             return
 
         self.video_path = path
@@ -2790,7 +2920,7 @@ class VideoToGifTab(QWidget):
         self.progress_bar.hide()
         self.generate_button.setEnabled(True)
         self._log(f"ERROR converting {os.path.basename(self.video_path)}: {error_message}")
-        QMessageBox.warning(self, "GIF generation failed", error_message)
+        show_error(self, "GIF generation failed", error_message)
 
     def on_keep_original_width_toggled(self, checked):
         self.width_slider.setEnabled(not checked)
@@ -2822,7 +2952,7 @@ class VideoToGifTab(QWidget):
             shutil.copy2(self.temp_gif_path, destination)
         except Exception as exc:  # noqa: BLE001
             self._log(f"ERROR saving to {destination}: {exc}")
-            QMessageBox.warning(self, "Save failed", str(exc))
+            show_error(self, "Save failed", str(exc))
             return
 
         self._log(f"Saved {destination}")
@@ -2838,7 +2968,7 @@ class VideoToGifTab(QWidget):
                 )
             elif delete_error:
                 self._log(f"ERROR deleting original file: {delete_error}")
-                QMessageBox.warning(
+                show_error(
                     self, "Couldn't delete original",
                     f"Saved the GIF, but couldn't delete the original file:\n{delete_error}",
                 )
@@ -3059,7 +3189,7 @@ class GifOptimiserTab(QWidget):
             with Image.open(path) as im:
                 width, height = im.size
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Couldn't open GIF", str(exc))
+            show_error(self, "Couldn't open GIF", str(exc))
             return
 
         self.source_path = path
@@ -3107,7 +3237,7 @@ class GifOptimiserTab(QWidget):
     def on_optimise_failed(self, error_message):
         self.progress_bar.hide()
         self._set_controls_enabled(True)
-        QMessageBox.warning(self, "Optimisation failed", error_message)
+        show_error(self, "Optimisation failed", error_message)
 
     # -- Target size presets -------------------------------------------------
 
@@ -3151,7 +3281,7 @@ class GifOptimiserTab(QWidget):
         self.save_to_button.setEnabled(True)
 
         if not met_target:
-            QMessageBox.warning(
+            show_error(
                 self, "Couldn't fully meet target",
                 f"Even at maximum compression, the result is "
                 f"{_format_file_size(size_bytes)}, which is still over the "
@@ -3162,7 +3292,7 @@ class GifOptimiserTab(QWidget):
     def on_preset_failed(self, error_message):
         self.progress_bar.hide()
         self._set_controls_enabled(True)
-        QMessageBox.warning(self, "Optimisation failed", error_message)
+        show_error(self, "Optimisation failed", error_message)
 
     def _set_controls_enabled(self, enabled):
         self.optimise_button.setEnabled(enabled)
@@ -3204,7 +3334,7 @@ class GifOptimiserTab(QWidget):
         try:
             shutil.copy2(self.temp_output_path, destination)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Save failed", str(exc))
+            show_error(self, "Save failed", str(exc))
             return
 
         QMessageBox.information(self, "Saved", f"Saved {os.path.basename(destination)}")
@@ -3559,7 +3689,7 @@ class ImageOptimiserTab(QWidget):
             with Image.open(path) as im:
                 width, height = im.size
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Couldn't open image", str(exc))
+            show_error(self, "Couldn't open image", str(exc))
             return
 
         self.source_path = path
@@ -3607,7 +3737,7 @@ class ImageOptimiserTab(QWidget):
     def on_optimise_failed(self, error_message):
         self.progress_bar.hide()
         self._set_controls_enabled(True)
-        QMessageBox.warning(self, "Optimisation failed", error_message)
+        show_error(self, "Optimisation failed", error_message)
 
     # -- Target size presets -------------------------------------------------
 
@@ -3651,7 +3781,7 @@ class ImageOptimiserTab(QWidget):
         self.save_to_button.setEnabled(True)
 
         if not met_target:
-            QMessageBox.warning(
+            show_error(
                 self, "Couldn't fully meet target",
                 f"Even at maximum compression, the result is "
                 f"{_format_file_size(size_bytes)}, which is still over the "
@@ -3662,7 +3792,7 @@ class ImageOptimiserTab(QWidget):
     def on_preset_failed(self, error_message):
         self.progress_bar.hide()
         self._set_controls_enabled(True)
-        QMessageBox.warning(self, "Optimisation failed", error_message)
+        show_error(self, "Optimisation failed", error_message)
 
     def _set_controls_enabled(self, enabled):
         self.optimise_button.setEnabled(enabled)
@@ -3708,7 +3838,7 @@ class ImageOptimiserTab(QWidget):
         try:
             shutil.copy2(self.temp_output_path, destination)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Save failed", str(exc))
+            show_error(self, "Save failed", str(exc))
             return
 
         QMessageBox.information(self, "Saved", f"Saved {os.path.basename(destination)}")
@@ -4282,7 +4412,7 @@ class WebpToGifTab(QWidget):
         total_in_pipeline = len(self.queued_items) + len(self.completed_rows)
         room_left = MAX_FILES - total_in_pipeline
         if room_left <= 0:
-            QMessageBox.warning(
+            show_error(
                 self, "Limit reached",
                 f"You already have {MAX_FILES} files in progress. Remove "
                 f"some before adding more.",
@@ -4290,7 +4420,7 @@ class WebpToGifTab(QWidget):
             return
 
         if len(paths) > room_left:
-            QMessageBox.warning(
+            show_error(
                 self, "Too many files",
                 f"You selected {len(paths)} files, but only {room_left} "
                 f"more can be added (limit is {MAX_FILES} total). Only the "
@@ -4308,7 +4438,7 @@ class WebpToGifTab(QWidget):
                     width, height = im.size
                     frame_count = getattr(im, "n_frames", 1)
             except Exception as exc:  # noqa: BLE001
-                QMessageBox.warning(self, "Couldn't open WebP", f"{os.path.basename(path)}: {exc}")
+                show_error(self, "Couldn't open WebP", f"{os.path.basename(path)}: {exc}")
                 continue
 
             frame_word = "frame" if frame_count == 1 else "frames"
@@ -4458,7 +4588,7 @@ class WebpToGifTab(QWidget):
     def on_target_size_finished(self, path, output_path, size_bytes, quality_used, met_target):
         self._finalize_row(path, output_path, size_bytes)
         if not met_target:
-            QMessageBox.warning(
+            show_error(
                 self, "Couldn't fully meet target",
                 f"{os.path.basename(path)}: even at minimum quality, the "
                 f"result is {_format_file_size(size_bytes)}, which is "
@@ -4522,7 +4652,7 @@ class WebpToGifTab(QWidget):
         try:
             shutil.copy2(temp_output_path, destination)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Save failed", str(exc))
+            show_error(self, "Save failed", str(exc))
             return
 
         entry = self.completed_rows.get(source_path)
@@ -4537,7 +4667,7 @@ class WebpToGifTab(QWidget):
                     f"Deleted original file:\n{os.path.basename(source_path)}",
                 )
             elif delete_error:
-                QMessageBox.warning(
+                show_error(
                     self, "Couldn't delete original",
                     f"Saved the GIF, but couldn't delete the original file:\n{delete_error}",
                 )
@@ -4769,7 +4899,7 @@ class VideoToImageTab(QWidget):
             fps = clip.fps or 24
             clip.close()
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Couldn't open video", str(exc))
+            show_error(self, "Couldn't open video", str(exc))
             return
 
         self.video_path = path
@@ -4890,7 +5020,7 @@ class VideoToImageTab(QWidget):
     def on_extract_failed(self, error_message):
         self._extraction_in_progress = False
         self.progress_bar.hide()
-        QMessageBox.warning(self, "Couldn't extract frame", error_message)
+        show_error(self, "Couldn't extract frame", error_message)
         self._extract_next_pending()
 
     def _extract_next_pending(self):
@@ -4946,7 +5076,7 @@ class VideoToImageTab(QWidget):
         try:
             self.current_image.save(destination, "PNG")
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Save failed", str(exc))
+            show_error(self, "Save failed", str(exc))
             return
 
         QMessageBox.information(self, "Saved", f"Saved {os.path.basename(destination)}")
@@ -5674,7 +5804,7 @@ class WebImageCard(QFrame):
             self.save_btn.setEnabled(True)
             self.save_btn.setText("Save")
             if error:
-                QMessageBox.critical(self, "Save failed", error)
+                show_critical(self, "Save failed", error)
         self._ui(done)
 
 
@@ -6913,7 +7043,7 @@ class OverlayStudioPage(QWidget):
         if error:
             (self.bg_slot if role == "bg" else self.fg_slot).set_layer(getattr(self, role))
             self.set_status("")
-            QMessageBox.warning(self, "Couldn't load image", error)
+            show_error(self, "Couldn't load image", error)
             return
         layer.pixmaps = [QPixmap.fromImage(image) for image in layer.qimages]
         layer.qimages = []
@@ -7216,7 +7346,7 @@ class OverlayStudioPage(QWidget):
                 self.save_btn.setText("Save Image…")
                 if error:
                     self.set_status("")
-                    QMessageBox.critical(self, "Save failed", error)
+                    show_critical(self, "Save failed", error)
                 else:
                     self.set_status(f"Saved {os.path.basename(path)}")
             self.tab.bridge.call.emit(done)
@@ -7950,7 +8080,7 @@ class WebpFlipbookTab(QWidget):
             self.source_image = None
             self.preview_frames = []
             self._update_controls()
-            QMessageBox.critical(self, "Could not open file", str(exc))
+            show_error(self, "Could not open file", str(exc))
             self.status_label.setText("Could not load source.")
 
     def choose_output_folder(self):
@@ -8027,7 +8157,7 @@ class WebpFlipbookTab(QWidget):
             columns, rows, reason = detect_flipbook_grid(self.source_image, self.is_animated)
         except Exception as exc:  # noqa: BLE001
             if not quiet:
-                QMessageBox.warning(self, "Auto detection failed", str(exc))
+                show_error(self, "Auto detection failed", str(exc))
             return
 
         self.cols_edit.setText(str(columns))
@@ -8163,14 +8293,14 @@ class WebpFlipbookTab(QWidget):
 
     def _start_job(self, job):
         if not self.input_path or self.source_image is None:
-            QMessageBox.warning(self, "No source", "Select a WebP file first.")
+            show_error(self, "No source", "Select a WebP file first.")
             return
         if self.busy:
             return
         try:
             settings = self._gather_settings()
         except ValueError as exc:
-            QMessageBox.warning(self, "Check the settings", str(exc))
+            show_error(self, "Check the settings", str(exc))
             return
 
         self._stop_play()
@@ -8206,7 +8336,7 @@ class WebpFlipbookTab(QWidget):
         self._update_controls()
         self.progress.setValue(0)
         self.status_label.setText("Failed.")
-        QMessageBox.critical(self, "Conversion failed", error_message)
+        show_critical(self, "Conversion failed", error_message)
 
 
 # ---------------------------------------------------------------------------
@@ -9088,7 +9218,7 @@ class BackgroundRemoverTab(QWidget):
             image = Image.open(path)
             image.load()
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Could not open image", str(exc))
+            show_critical(self, "Could not open image", str(exc))
             return
 
         self.source_path = path
@@ -9283,7 +9413,7 @@ class BackgroundRemoverTab(QWidget):
         self.ai_progress.setVisible(False)
         self._update_controls()
         self.set_status("AI cutout failed.")
-        QMessageBox.critical(self, "AI cutout failed", error_message)
+        show_critical(self, "AI cutout failed", error_message)
 
     # -- Brushes ---------------------------------------------------------------
 
@@ -9416,7 +9546,7 @@ class BackgroundRemoverTab(QWidget):
         try:
             _web_save_still(image, path, fmt)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Save failed", str(exc))
+            show_critical(self, "Save failed", str(exc))
             return
         self.set_status(f"Saved {os.path.basename(path)}")
 
@@ -9654,7 +9784,8 @@ GENERATION_MODELS = {
         "id": "black-forest-labs/FLUX.1-schnell",
         "size": 1024, "family": "flux", "steps": 4, "guidance": 0,
             "note": "About 24 GB to download, and happiest with 12 GB+ of video memory. "
-        "Only needs a few steps. Free licence, no sign-up.",
+        "Only needs a few steps. Free, but you have to accept its terms on "
+        "the model's page and add a Hugging Face token first.",
     },
     "FLUX.1 dev — best quality, slower": {
         "id": "black-forest-labs/FLUX.1-dev",
@@ -9738,23 +9869,97 @@ def huggingface_token():
         "HUGGING_FACE_HUB_TOKEN", "")
 
 
+class ModelAccessError(Exception):
+    """The model can't be downloaded with the current token. The message
+    says what to do about it."""
+
+
+def check_model_access(model_id):
+    """Asks Hugging Face whether this model can be downloaded, before
+    starting a multi-gigabyte download that would only fail.
+
+    Raises ModelAccessError with step-by-step instructions when it can't.
+    Anything inconclusive (no internet, an old huggingface_hub, a local
+    folder, a model already downloaded) is let through for the download
+    itself to report.
+    """
+    if not model_id or os.path.isdir(model_id):
+        return
+    try:
+        from huggingface_hub import auth_check, try_to_load_from_cache
+        from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
+    except ImportError:
+        return
+    try:
+        if isinstance(try_to_load_from_cache(model_id, "model_index.json"), str):
+            return  # already downloaded, works offline
+    except Exception:  # noqa: BLE001
+        pass
+
+    token = huggingface_token() or None
+    page = f"https://huggingface.co/{model_id}"
+    try:
+        auth_check(model_id, token=token)
+    except GatedRepoError:
+        if token:
+            raise ModelAccessError(
+                f"Your Hugging Face token doesn't have access to {model_id} "
+                "yet.\n\n"
+                f"1. Open {page} while signed in to the same Hugging Face "
+                "account the token belongs to.\n"
+                "2. Accept the terms at the top of the page (\"Agree and access "
+                "repository\").\n"
+                "3. Try again - access is usually granted instantly."
+            ) from None
+        raise ModelAccessError(
+            f"{model_id} is free, but Hugging Face only lets you download it "
+            "once you've accepted its terms and the app has a token.\n\n"
+            "1. Sign in or make a free account at huggingface.co.\n"
+            f"2. Open {page} and accept the terms at the top of the page.\n"
+            "3. Create a token at huggingface.co/settings/tokens - the "
+            "\"Read\" type is enough.\n"
+            "4. Paste it into the HF token box in this tab's settings, then "
+            "try again.\n\n"
+            "Or pick SDXL or SD Turbo, which need none of this."
+        ) from None
+    except RepositoryNotFoundError:
+        if token:
+            raise ModelAccessError(
+                f"Hugging Face says {model_id} doesn't exist or your token "
+                "can't see it.\n\n"
+                "Check the model name, and that the token in the HF token box "
+                "is current - you can make a new one at "
+                "huggingface.co/settings/tokens."
+            ) from None
+        raise ModelAccessError(
+            f"Hugging Face says there's no model called {model_id}.\n\n"
+            "Check the name against the model's page. If it's a private or "
+            "gated model, add a token in the HF token box first."
+        ) from None
+    except Exception:  # noqa: BLE001
+        return
+
+
 def explain_model_error(message, model_id):
     """Turns a diffusers/hub error into something you can act on."""
+    prefix = "ModelAccessError: "
+    if message.startswith(prefix):
+        return message[len(prefix):].split("\n\nTraceback", 1)[0]
     lowered = message.lower()
     if ("not a valid model identifier" in lowered or "401" in lowered
             or "403" in lowered or "gated" in lowered or "restricted" in lowered):
         return (
             f"Couldn't fetch {model_id}.\n\n"
             "The usual reasons, most likely first:\n\n"
-            "1. The model needs its licence accepting. FLUX.1 dev and SD 3.5 "
-            "are gated - open the model's page on huggingface.co while signed "
+            "1. The model needs its licence accepting. Both FLUX.1 models and "
+            "SD 3.5 are gated - open the model's page on huggingface.co while signed "
             "in, accept the terms, then paste an access token into the HF "
             "token box in Settings.\n\n"
             "2. No internet, or it's being blocked. The first use of a model "
             "downloads it, so a firewall or proxy will stop it.\n\n"
             "3. The name is wrong - if you typed a custom one, check it "
             "against the model's page.\n\n"
-            "FLUX.1 schnell, SDXL and SD Turbo need no token, so if those fail "
+            "SDXL and SD Turbo need no token, so if those fail "
             "too it's almost certainly the connection."
         )
     if "out of memory" in lowered or "cuda oom" in lowered:
@@ -9908,6 +10113,7 @@ class GenerationWorker(QRunnable):
                 "Loading the model… the first time also downloads it, which "
                 "can take a while."
             )
+            check_model_access(self.request["model_id"])
             pipeline = load_generation_pipeline(
                 self.request["model_id"],
                 self.request.get("init_image") is not None,
@@ -9922,7 +10128,8 @@ class GenerationWorker(QRunnable):
         except GenerationCancelled:
             self.signals.cancelled.emit()
         except Exception as exc:  # noqa: BLE001
-            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.signals.failed.emit(
+                f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc().rstrip()}")
 
 
 class ReferenceList(QListWidget):
@@ -10341,7 +10548,7 @@ class ImageCreationTab(QWidget):
         grid.addWidget(QLabel("HF token"), 4, 0)
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
-        self.token_edit.setPlaceholderText("only needed for FLUX.1 dev and SD 3.5")
+        self.token_edit.setPlaceholderText("needed for FLUX.1 and SD 3.5")
         self.token_edit.setToolTip(
             "Some models are behind a licence you accept on their page, and "
             "then need an access token to download.\n"
@@ -10503,12 +10710,9 @@ class ImageCreationTab(QWidget):
         self._finish()
         self.status_label.setText("Generation failed.")
         model_id, _family = self._selected_model()
-        box = QMessageBox(self)
-        box.setWindowTitle("Generation failed")
-        box.setIcon(QMessageBox.Warning)
-        box.setText(explain_model_error(error_message, model_id))
-        box.setDetailedText(error_message)
-        box.exec()
+        show_error(self, "Generation failed",
+                   explain_model_error(error_message, model_id),
+                   details=error_message)
 
     def _on_cancelled(self):
         self._finish()
@@ -10547,7 +10751,7 @@ class ImageCreationTab(QWidget):
         try:
             _web_save_still(self.result, path, fmt)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Save failed", str(exc))
+            show_critical(self, "Save failed", str(exc))
             return
         self.status_label.setText(f"Saved {os.path.basename(path)}")
 
@@ -10727,9 +10931,51 @@ EXTENSION_CATALOGUE = {
 }
 
 
+GITHUB_RELEASES_API = (
+    f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
+)
+
+
+class ExtensionNotPublished(Exception):
+    """No release on GitHub carries this extension's .zip yet."""
+
+
+# How to tell each tool already works without its extension - true when the
+# .exe was built with that tool's libraries inside it.
+EXTENSION_BUILT_IN = {
+    "web_images": lambda: WEBENGINE_AVAILABLE,
+    "video_tools": lambda: MOVIEPY_AVAILABLE,
+    "flipbook": lambda: NUMPY_AVAILABLE,
+    "background_remover": lambda: ONNX_AVAILABLE,
+    "image_creation": lambda: GENERATION_AVAILABLE,
+}
+
+
 def extension_asset_url(asset):
-    return (f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-            f"/download/{asset}")
+    """Where to download an extension from.
+
+    Looks through the recent releases, newest first, for one that actually
+    has the file attached. Going straight to releases/latest 404s whenever
+    the newest release was published without its extensions, even though an
+    older release has them.
+    """
+    request = urllib.request.Request(
+        f"{GITHUB_RELEASES_API}?per_page=20",
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": f"{APP_TITLE}-extensions"})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        releases = json.loads(response.read().decode("utf-8"))
+    for release in releases:
+        if release.get("draft"):
+            continue
+        for item in release.get("assets", []):
+            if item.get("name") == asset and item.get("browser_download_url"):
+                return item["browser_download_url"]
+    raise ExtensionNotPublished(
+        f"{asset} isn't attached to any release on "
+        f"github.com/{GITHUB_OWNER}/{GITHUB_REPO} yet, so there's nothing to "
+        f"download. It needs building (build_extensions.py) and uploading to "
+        f"a release first.")
 
 
 class ExtensionSignals(QObject):
@@ -10753,9 +10999,11 @@ class ExtensionInstallWorker(QRunnable):
         archive = destination + ".part"
         try:
             os.makedirs(extensions_folder(), exist_ok=True)
+            self.signals.status.emit("Finding the download…")
+            url = extension_asset_url(self.asset)
             self.signals.status.emit("Downloading…")
             request = urllib.request.Request(
-                extension_asset_url(self.asset),
+                url,
                 headers={"User-Agent": f"{APP_TITLE}-extensions"})
             with urllib.request.urlopen(request, timeout=60) as response:
                 total = int(response.headers.get("Content-Length") or 0)
@@ -10787,7 +11035,12 @@ class ExtensionInstallWorker(QRunnable):
                         os.remove(leftover)
                     except OSError:
                         pass
-            self.signals.failed.emit(self.extension_id, f"{type(exc).__name__}: {exc}")
+            if isinstance(exc, ExtensionNotPublished):
+                message = str(exc)
+            else:
+                message = (f"{type(exc).__name__}: {exc}\n\n"
+                           f"{traceback.format_exc().rstrip()}")
+            self.signals.failed.emit(self.extension_id, message)
 
 
 class ExtensionRow(QFrame):
@@ -10837,13 +11090,25 @@ class ExtensionRow(QFrame):
     def is_installed(self):
         return self.extension_id in installed_extension_ids()
 
+    def is_built_in(self):
+        """The tool's libraries are part of this .exe, so it works without
+        the extension being downloaded."""
+        return (not self.is_installed()
+                and EXTENSION_BUILT_IN.get(self.extension_id, lambda: False)())
+
     def refresh(self):
         installed = self.is_installed()
+        built_in = self.is_built_in()
         self.action_button.setText("Remove" if installed else "Install")
-        self.action_button.setObjectName("" if installed else "ConvertButton")
+        self.action_button.setObjectName(
+            "" if installed or built_in else "ConvertButton")
         self.action_button.setStyleSheet(self.action_button.styleSheet())
-        self.status_label.setText(
-            "Installed" if installed else "Not installed")
+        self.action_button.setVisible(not built_in)
+        if built_in:
+            self.status_label.setText("Built into this version")
+        else:
+            self.status_label.setText(
+                "Installed" if installed else "Not installed")
 
     def on_action(self):
         if self.is_installed():
@@ -10874,11 +11139,11 @@ class ExtensionRow(QFrame):
         self.action_button.setEnabled(True)
         self.refresh()
         self.status_label.setText("Couldn't install it.")
-        QMessageBox.warning(
+        summary, _, details = message.partition("\n\n")
+        show_error(
             self, "Extension install failed",
-            f"{self.info['name']} didn't install.\n\n{message}\n\n"
-            "If it says 404, that extension hasn't been published to the "
-            "release yet."
+            f"{self.info['name']} didn't install.\n\n{summary}",
+            details=details,
         )
 
     def remove(self):
@@ -11462,7 +11727,7 @@ class MainWindow(QMainWindow):
         try:
             subprocess.Popen(command, cwd=self._app_folder())
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(
+            show_error(
                 self, "Couldn't start the updater",
                 f"{exc}\n\nYou can download it yourself instead."
             )
@@ -11479,7 +11744,7 @@ class MainWindow(QMainWindow):
 
     def on_update_check_failed(self, error_message, silent):
         if not silent:
-            QMessageBox.warning(
+            show_error(
                 self, "Update check failed",
                 f"Couldn't check for updates:\n{error_message}",
             )
@@ -11908,7 +12173,7 @@ class MainWindow(QMainWindow):
 
     def add_files(self, paths):
         if Image is None:
-            QMessageBox.critical(
+            show_critical(
                 self,
                 "Missing dependency",
                 "Pillow is not installed. Run: pip install Pillow",
@@ -11918,7 +12183,7 @@ class MainWindow(QMainWindow):
         total_in_pipeline = len(self.queued_items) + len(self.completed_rows)
         room_left = MAX_FILES - total_in_pipeline
         if room_left <= 0:
-            QMessageBox.warning(
+            show_error(
                 self, "Limit reached",
                 f"You already have {MAX_FILES} files in progress. Remove "
                 f"some before adding more.",
@@ -11926,7 +12191,7 @@ class MainWindow(QMainWindow):
             return
 
         if len(paths) > room_left:
-            QMessageBox.warning(
+            show_error(
                 self,
                 "Too many files",
                 f"You selected {len(paths)} files, but only {room_left} "
@@ -11965,7 +12230,7 @@ class MainWindow(QMainWindow):
         # only one format can be converted at a time.
         current_extensions = {os.path.splitext(p)[1].lower() for p in self.queued_items}
         if len(current_extensions) > 1:
-            QMessageBox.warning(
+            show_error(
                 self, "Multiple file formats detected",
                 "Selected Files contains more than one file format: "
                 f"{', '.join(sorted(current_extensions))}.\n\n"
@@ -11990,7 +12255,7 @@ class MainWindow(QMainWindow):
 
         current_extensions = {os.path.splitext(p)[1].lower() for p in self.queued_items}
         if len(current_extensions) > 1:
-            QMessageBox.warning(
+            show_error(
                 self, "Multiple file formats selected",
                 "Selected Files still contains more than one file format: "
                 f"{', '.join(sorted(current_extensions))}.\n\n"
@@ -12106,7 +12371,7 @@ class MainWindow(QMainWindow):
                     f"Deleted original file:\n{os.path.basename(source_path)}",
                 )
             elif delete_error:
-                QMessageBox.warning(
+                show_error(
                     self, "Couldn't delete original",
                     f"Saved the file, but couldn't delete the original file:\n{delete_error}",
                 )
@@ -12114,7 +12379,7 @@ class MainWindow(QMainWindow):
             if self.show_filenames_after_conversion:
                 self.show_filenames_window([os.path.basename(result)])
         else:
-            QMessageBox.warning(self, "Save failed", result)
+            show_error(self, "Save failed", result)
 
     def save_single_to(self, source_path):
         fmt = self._current_output_format()
@@ -12281,6 +12546,7 @@ def main():
     app.setApplicationName(APP_TITLE)
     app.setWindowIcon(app_icon())
     app.setStyleSheet(MAC_STYLE)
+    install_error_hooks()
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

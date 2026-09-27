@@ -481,7 +481,7 @@ def installed_components():
 
 
 APP_TITLE = "ImageGen"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 
 # Update checking - looks at GitHub Releases for this repo. Create releases
 # there with tags like "v1.1.0" and this will detect anything newer than
@@ -9784,7 +9784,8 @@ GENERATION_MODELS = {
         "id": "black-forest-labs/FLUX.1-schnell",
         "size": 1024, "family": "flux", "steps": 4, "guidance": 0,
             "note": "About 24 GB to download, and happiest with 12 GB+ of video memory. "
-        "Only needs a few steps. Free licence, no sign-up.",
+        "Only needs a few steps. Free, but you have to accept its terms on "
+        "the model's page and add a Hugging Face token first.",
     },
     "FLUX.1 dev — best quality, slower": {
         "id": "black-forest-labs/FLUX.1-dev",
@@ -9868,23 +9869,97 @@ def huggingface_token():
         "HUGGING_FACE_HUB_TOKEN", "")
 
 
+class ModelAccessError(Exception):
+    """The model can't be downloaded with the current token. The message
+    says what to do about it."""
+
+
+def check_model_access(model_id):
+    """Asks Hugging Face whether this model can be downloaded, before
+    starting a multi-gigabyte download that would only fail.
+
+    Raises ModelAccessError with step-by-step instructions when it can't.
+    Anything inconclusive (no internet, an old huggingface_hub, a local
+    folder, a model already downloaded) is let through for the download
+    itself to report.
+    """
+    if not model_id or os.path.isdir(model_id):
+        return
+    try:
+        from huggingface_hub import auth_check, try_to_load_from_cache
+        from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
+    except ImportError:
+        return
+    try:
+        if isinstance(try_to_load_from_cache(model_id, "model_index.json"), str):
+            return  # already downloaded, works offline
+    except Exception:  # noqa: BLE001
+        pass
+
+    token = huggingface_token() or None
+    page = f"https://huggingface.co/{model_id}"
+    try:
+        auth_check(model_id, token=token)
+    except GatedRepoError:
+        if token:
+            raise ModelAccessError(
+                f"Your Hugging Face token doesn't have access to {model_id} "
+                "yet.\n\n"
+                f"1. Open {page} while signed in to the same Hugging Face "
+                "account the token belongs to.\n"
+                "2. Accept the terms at the top of the page (\"Agree and access "
+                "repository\").\n"
+                "3. Try again - access is usually granted instantly."
+            ) from None
+        raise ModelAccessError(
+            f"{model_id} is free, but Hugging Face only lets you download it "
+            "once you've accepted its terms and the app has a token.\n\n"
+            "1. Sign in or make a free account at huggingface.co.\n"
+            f"2. Open {page} and accept the terms at the top of the page.\n"
+            "3. Create a token at huggingface.co/settings/tokens - the "
+            "\"Read\" type is enough.\n"
+            "4. Paste it into the HF token box in this tab's settings, then "
+            "try again.\n\n"
+            "Or pick SDXL or SD Turbo, which need none of this."
+        ) from None
+    except RepositoryNotFoundError:
+        if token:
+            raise ModelAccessError(
+                f"Hugging Face says {model_id} doesn't exist or your token "
+                "can't see it.\n\n"
+                "Check the model name, and that the token in the HF token box "
+                "is current - you can make a new one at "
+                "huggingface.co/settings/tokens."
+            ) from None
+        raise ModelAccessError(
+            f"Hugging Face says there's no model called {model_id}.\n\n"
+            "Check the name against the model's page. If it's a private or "
+            "gated model, add a token in the HF token box first."
+        ) from None
+    except Exception:  # noqa: BLE001
+        return
+
+
 def explain_model_error(message, model_id):
     """Turns a diffusers/hub error into something you can act on."""
+    prefix = "ModelAccessError: "
+    if message.startswith(prefix):
+        return message[len(prefix):].split("\n\nTraceback", 1)[0]
     lowered = message.lower()
     if ("not a valid model identifier" in lowered or "401" in lowered
             or "403" in lowered or "gated" in lowered or "restricted" in lowered):
         return (
             f"Couldn't fetch {model_id}.\n\n"
             "The usual reasons, most likely first:\n\n"
-            "1. The model needs its licence accepting. FLUX.1 dev and SD 3.5 "
-            "are gated - open the model's page on huggingface.co while signed "
+            "1. The model needs its licence accepting. Both FLUX.1 models and "
+            "SD 3.5 are gated - open the model's page on huggingface.co while signed "
             "in, accept the terms, then paste an access token into the HF "
             "token box in Settings.\n\n"
             "2. No internet, or it's being blocked. The first use of a model "
             "downloads it, so a firewall or proxy will stop it.\n\n"
             "3. The name is wrong - if you typed a custom one, check it "
             "against the model's page.\n\n"
-            "FLUX.1 schnell, SDXL and SD Turbo need no token, so if those fail "
+            "SDXL and SD Turbo need no token, so if those fail "
             "too it's almost certainly the connection."
         )
     if "out of memory" in lowered or "cuda oom" in lowered:
@@ -10038,6 +10113,7 @@ class GenerationWorker(QRunnable):
                 "Loading the model… the first time also downloads it, which "
                 "can take a while."
             )
+            check_model_access(self.request["model_id"])
             pipeline = load_generation_pipeline(
                 self.request["model_id"],
                 self.request.get("init_image") is not None,
@@ -10052,7 +10128,8 @@ class GenerationWorker(QRunnable):
         except GenerationCancelled:
             self.signals.cancelled.emit()
         except Exception as exc:  # noqa: BLE001
-            self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+            self.signals.failed.emit(
+                f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc().rstrip()}")
 
 
 class ReferenceList(QListWidget):
@@ -10471,7 +10548,7 @@ class ImageCreationTab(QWidget):
         grid.addWidget(QLabel("HF token"), 4, 0)
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
-        self.token_edit.setPlaceholderText("only needed for FLUX.1 dev and SD 3.5")
+        self.token_edit.setPlaceholderText("needed for FLUX.1 and SD 3.5")
         self.token_edit.setToolTip(
             "Some models are behind a licence you accept on their page, and "
             "then need an access token to download.\n"
@@ -10633,12 +10710,9 @@ class ImageCreationTab(QWidget):
         self._finish()
         self.status_label.setText("Generation failed.")
         model_id, _family = self._selected_model()
-        box = QMessageBox(self)
-        box.setWindowTitle("Generation failed")
-        box.setIcon(QMessageBox.Warning)
-        box.setText(explain_model_error(error_message, model_id))
-        box.setDetailedText(error_message)
-        box.exec()
+        show_error(self, "Generation failed",
+                   explain_model_error(error_message, model_id),
+                   details=error_message)
 
     def _on_cancelled(self):
         self._finish()
@@ -10866,6 +10940,17 @@ class ExtensionNotPublished(Exception):
     """No release on GitHub carries this extension's .zip yet."""
 
 
+# How to tell each tool already works without its extension - true when the
+# .exe was built with that tool's libraries inside it.
+EXTENSION_BUILT_IN = {
+    "web_images": lambda: WEBENGINE_AVAILABLE,
+    "video_tools": lambda: MOVIEPY_AVAILABLE,
+    "flipbook": lambda: NUMPY_AVAILABLE,
+    "background_remover": lambda: ONNX_AVAILABLE,
+    "image_creation": lambda: GENERATION_AVAILABLE,
+}
+
+
 def extension_asset_url(asset):
     """Where to download an extension from.
 
@@ -11005,13 +11090,25 @@ class ExtensionRow(QFrame):
     def is_installed(self):
         return self.extension_id in installed_extension_ids()
 
+    def is_built_in(self):
+        """The tool's libraries are part of this .exe, so it works without
+        the extension being downloaded."""
+        return (not self.is_installed()
+                and EXTENSION_BUILT_IN.get(self.extension_id, lambda: False)())
+
     def refresh(self):
         installed = self.is_installed()
+        built_in = self.is_built_in()
         self.action_button.setText("Remove" if installed else "Install")
-        self.action_button.setObjectName("" if installed else "ConvertButton")
+        self.action_button.setObjectName(
+            "" if installed or built_in else "ConvertButton")
         self.action_button.setStyleSheet(self.action_button.styleSheet())
-        self.status_label.setText(
-            "Installed" if installed else "Not installed")
+        self.action_button.setVisible(not built_in)
+        if built_in:
+            self.status_label.setText("Built into this version")
+        else:
+            self.status_label.setText(
+                "Installed" if installed else "Not installed")
 
     def on_action(self):
         if self.is_installed():

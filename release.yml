@@ -1,0 +1,88 @@
+# Builds ImageGen on GitHub's own Windows machines and attaches the results
+# to a release - so you don't have to build or upload anything by hand.
+#
+# How to use it:
+#   1. Set APP_VERSION in image_to_png_converter.py (e.g. 1.10.0)
+#   2. git tag v1.10.0 && git push origin v1.10.0
+#   3. Watch the Actions tab. When it finishes, the release exists with the
+#      .exe files attached, and the app starts offering the update.
+#
+# Building here takes roughly 10-15 minutes. It does NOT include the image
+# generation libraries (PyTorch is far too big for a runner), so that tool
+# ships as an extension.
+
+name: Build and release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"     # 3.13+ has no wheels for some of these
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyQt6 PyQt6-WebEngine Pillow pillow-heif pillow-avif-plugin
+          pip install numpy onnxruntime requests moviepy imageio-ffmpeg
+          pip install pyinstaller
+
+      - name: Check the tag matches APP_VERSION
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          APP=$(grep -oP 'APP_VERSION = "\K[^"]+' image_to_png_converter.py)
+          echo "tag=$TAG  app=$APP"
+          if [ "$TAG" != "$APP" ]; then
+            echo "::error::Tag $TAG doesn't match APP_VERSION $APP - the update"
+            echo "::error::check compares these, so they have to agree."
+            exit 1
+          fi
+
+      - name: Build the app
+        run: |
+          python prepare_icon.py
+          python -m PyInstaller --onefile --windowed --clean --noconfirm `
+            --name ImageGen `
+            --collect-all pillow_heif --collect-all PIL `
+            --hidden-import PyQt6.QtWebEngineWidgets `
+            --hidden-import PyQt6.QtWebEngineCore `
+            --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
+            --icon app_icon.ico `
+            image_to_png_converter.py
+
+      - name: Build the installer and updater
+        run: |
+          python -m PyInstaller --onefile --windowed --clean --noconfirm `
+            --name ImageGenSetup `
+            --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
+            --icon app_icon.ico installer.py
+          python -m PyInstaller --onefile --windowed --clean --noconfirm `
+            --name ImageGenUpdater `
+            --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
+            --icon app_icon.ico updater.py
+
+      - name: Build the extensions
+        run: python build_extensions.py
+        continue-on-error: true      # extensions are optional to the release
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ImageGen.exe
+            dist/ImageGenSetup.exe
+            dist/ImageGenUpdater.exe
+            dist/extension_*.zip
+          generate_release_notes: true

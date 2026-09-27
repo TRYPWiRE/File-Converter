@@ -1,0 +1,36 @@
+# Core
+PyQt6>=6.6
+Pillow>=10.0
+
+# Images tab extras
+pillow-heif          # HEIC / HEIF
+pillow-avif-plugin   # AVIF - not needed if Pillow is 11.3+ (built in)
+rawpy                # camera RAW
+
+# Video to GIF / Video to Image
+moviepy
+imageio-ffmpeg
+
+# Web Images tab
+PyQt6-WebEngine>=6.6 # embedded browser (Chromium)
+requests             # image downloads (falls back to urllib without it)
+
+# WebP Flipbook + Background Remover tabs
+numpy                # grid detection, and all background-removal tools
+
+# Background Remover - AI subject detection (the model itself downloads
+# itself on first use, about 5 MB for the default one)
+onnxruntime
+
+# Building the exe
+pyinstaller>=6
+
+# Image Creation tab - local Stable Diffusion. Big installs (several GB) and
+# not required for anything else, so they're commented out by default.
+# With an NVIDIA card, install torch from PyTorch's own index first:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch
+# diffusers
+# transformers
+# accelerate
+# safetensors

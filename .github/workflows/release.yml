@@ -7,9 +7,7 @@
 #   3. Watch the Actions tab. When it finishes, the release exists with the
 #      .exe files attached, and the app starts offering the update.
 #
-# Building here takes roughly 10-15 minutes. It does NOT include the image
-# generation libraries (PyTorch is far too big for a runner), so that tool
-# ships as an extension.
+# Building here takes roughly 10-15 minutes.
 
 name: Build and release
 

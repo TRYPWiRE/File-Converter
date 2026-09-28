@@ -73,16 +73,6 @@ EXTENSIONS = {
         "globs": [],
         "optional": ["coloredlogs", "humanfriendly", "flatbuffers", "sympy", "mpmath"],
     },
-    "image_creation": {
-        "asset": "extension_imagegen.zip",
-        "packages": ["torch", "torchgen", "functorch", "diffusers", "transformers",
-                     "safetensors", "accelerate", "huggingface_hub", "tokenizers",
-                     "regex", "filelock", "fsspec", "networkx", "jinja2",
-                     "markupsafe", "yaml", "psutil"],
-        "globs": [],
-        "optional": ["torchgen", "functorch", "networkx", "jinja2", "markupsafe",
-                     "yaml", "psutil", "fsspec", "regex", "filelock"],
-    },
 }
 
 
@@ -108,7 +98,7 @@ def find_package(name):
 
 
 def metadata_dirs(name, roots):
-    """The .dist-info folders, which diffusers and friends read at import."""
+    """The .dist-info folders, which some packages read at import."""
     found = []
     for root in roots:
         if not os.path.isdir(root):

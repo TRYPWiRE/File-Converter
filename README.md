@@ -57,19 +57,10 @@ Has its own secondary nav bar with two pages:
 - Saves as PNG, WebP or AVIF with real transparency (JPG isn't offered — it can't store it), keeping the original file name with the new extension
 - **AI cutout** — a subject-detection model looks at the picture and works out what to keep, so it copes with busy backgrounds and subjects that share colours with them. Three models to pick from (fast 5 MB, best-quality 176 MB, and one trained on people/characters); the chosen model downloads itself on first use and is cached, then runs offline
 
-### Image Creation tab
-
-- Type a description and generate a picture **locally** — the model runs on this PC, and nothing is uploaded
-- Models, best first: **FLUX.1 schnell / dev** (closest thing to the big online generators, wants a 12 GB+ GPU), **SD 3.5 Medium**, **SDXL 1.0 / Turbo**, **SD Turbo** and **Dreamshaper 8** for modest hardware, plus **Custom** for any Hugging Face model id or local folder
-- **Reference images** can be added or dropped in; several are cropped to the output shape and averaged into one starting picture, with a slider for how far the result may drift from them
-- Negative prompt, size, steps, guidance and seed (with **Reuse last** to re-roll a variation of the same picture), a progress bar per step and a **Stop** button
-- Results can be saved, fed back in as a reference, or sent straight to the **Background Remover**
-- Needs PyTorch and diffusers, which aren't bundled — the tab lists the current install commands for your exact Python, with **Copy the CUDA command**, a link to PyTorch's own picker, and **Check again** so you don't have to restart after installing
-
 ### Window
 - Maximise / restore from the green title-bar button, or by double-clicking the title bar; drag a maximised window to restore it
 - **Resize from any edge or corner**, as well as the bottom-right grip
-- The Background Remover and Image Creation tabs have a **draggable divider** between their controls and their preview, so either side can be given more room
+- The Background Remover tab has a **draggable divider** between their controls and their preview, so either side can be given more room
 - Opens sized to fit whatever screen it's on, down to small and high-DPI displays; the WebP to GIF tab stacks its preview underneath the settings when the window is narrow
 
 ### General

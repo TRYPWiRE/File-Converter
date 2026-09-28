@@ -141,20 +141,6 @@ COMPONENTS = [
             "use, about 5 MB.</span>"
         ),
     },
-    {
-        "id": "image_creation",
-        "bundled": True,
-        "name": "Image Creation",
-        "asset": "component_imagegen.zip",
-        "size_mb": 2600,
-        "default": False,
-        "needs_gpu": True,
-        "description": (
-            "Generate pictures from a description, running entirely on this "
-            "PC. <span class='hl'>This is the big one</span> - it brings in "
-            "PyTorch and the model runtime."
-        ),
-    },
 ]
 
 # The pages, in order. "body" is HTML - style it however you like.
@@ -162,7 +148,7 @@ PAGES = [
     {
         "key": "welcome",
         "title": f"Welcome to {BRAND['app_name']}",
-        "subtitle": "A toolkit for converting, tidying and creating images.",
+        "subtitle": "A toolkit for converting and tidying images.",
         "body": """
             <p class="big">Thanks for installing.</p>
             <p>This installer will put <b>ImageGen</b> on your PC and let
@@ -192,8 +178,6 @@ PAGES = [
                   keeping transparency.</li>
               <li><b>Background Remover</b> - AI cutouts for people and
                   characters, with brushes for touching up.</li>
-              <li><b>Image Creation</b> - generate images from a description,
-                  locally on your own machine.</li>
             </ul>
         """,
     },
@@ -208,8 +192,6 @@ PAGES = [
                   whole folder through in one go.</li>
               <li><span class="accent">Presets</span> - save your favourite
                   settings and reuse them in a click.</li>
-              <li><span class="accent">More generation models</span> as good
-                  ones become available to run locally.</li>
               <li><span class="accent">Watermarking and batch renaming.</span></li>
             </ul>
             <p class="small">The app checks GitHub for updates, so new tools and
@@ -327,110 +309,6 @@ def resource(name):
 def default_install_dir():
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(base, "Programs", BRAND["app_name"].replace(" ", ""))
-
-
-# -- GPU detection ------------------------------------------------------------
-
-def detect_gpu():
-    """Returns (description, vram_gb). Uses nvidia-smi first, then Windows'
-    own list, so it works without any Python packages installed."""
-    try:
-        output = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout.strip()
-        if output:
-            name, memory = output.splitlines()[0].split(",")
-            return name.strip(), round(int(memory.strip()) / 1024)
-    except Exception:  # noqa: BLE001
-        pass
-
-    try:
-        output = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-CimInstance Win32_VideoController | "
-             "Select-Object -First 1 -ExpandProperty Name)"],
-            capture_output=True, text=True, timeout=15,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout.strip()
-        if output:
-            return output, 0
-    except Exception:  # noqa: BLE001
-        pass
-    return "", 0
-
-
-def recommend_model(gpu_name, vram_gb):
-    """What to suggest for this machine, and what to warn about."""
-    nvidia = "nvidia" in (gpu_name or "").lower() or "geforce" in (gpu_name or "").lower()
-    if not gpu_name:
-        return {
-            "headline": "No graphics card detected",
-            "recommended": "SD Turbo",
-            "detail": (
-                "Image generation will fall back to your processor. It does "
-                "work, but expect <b>several minutes per image</b>. "
-                "<span class='hl'>SD Turbo</span> is the one to use - it's the "
-                "smallest and quickest."
-            ),
-            "warn": "Heavier models will be very slow on a CPU.",
-        }
-    if not nvidia:
-        return {
-            "headline": f"Found: {gpu_name}",
-            "recommended": "SD Turbo",
-            "detail": (
-                "Local generation is fastest on NVIDIA cards, which this "
-                "doesn't appear to be, so it will most likely run on the "
-                "processor. <span class='hl'>SD Turbo</span> is the sensible "
-                "starting point."
-            ),
-            "warn": "The larger models will be slow without an NVIDIA GPU.",
-        }
-    if vram_gb >= 12:
-        return {
-            "headline": f"Found: {gpu_name} ({vram_gb} GB)",
-            "recommended": "FLUX.1 schnell",
-            "detail": (
-                "Plenty of memory. <span class='hl'>FLUX.1 schnell</span> is "
-                "recommended - it's the closest thing to the big online "
-                "generators that runs locally, and this card can hold it."
-            ),
-            "warn": "",
-        }
-    if vram_gb >= 8:
-        return {
-            "headline": f"Found: {gpu_name} ({vram_gb} GB)",
-            "recommended": "SDXL 1.0",
-            "detail": (
-                "<span class='hl'>SDXL 1.0</span> is the sweet spot for this "
-                "card. FLUX.1 will run too, but parts of it have to be shuffled "
-                "between the card and main memory."
-            ),
-            "warn": "FLUX.1 is selectable, but expect it to be slow and to "
-                    "stutter while it swaps data around.",
-        }
-    if vram_gb >= 4:
-        return {
-            "headline": f"Found: {gpu_name} ({vram_gb} GB)",
-            "recommended": "SD Turbo",
-            "detail": (
-                "A smaller card. <span class='hl'>SD Turbo</span> or "
-                "<span class='hl'>SDXL Turbo</span> will be comfortable and "
-                "quick."
-            ),
-            "warn": "SDXL 1.0 and FLUX.1 may not fit and can fail with an "
-                    "out-of-memory error.",
-        }
-    return {
-        "headline": f"Found: {gpu_name}",
-        "recommended": "SD Turbo",
-        "detail": "Little video memory available, so stick to "
-                  "<span class='hl'>SD Turbo</span>.",
-        "warn": "The larger models are unlikely to fit.",
-    }
 
 
 # -- Downloading ---------------------------------------------------------------
@@ -663,7 +541,6 @@ class Installer(QWidget):
         for page in PAGES:
             self.stack.addWidget(self._text_page(page))
         self.stack.addWidget(self._components_page())
-        self.stack.addWidget(self._gpu_page())
         self.stack.addWidget(self._location_page())
         self.stack.addWidget(self._progress_page())
         self.stack.addWidget(self._finish_page())
@@ -748,32 +625,6 @@ class Installer(QWidget):
             card.component["size_mb"] for card in self.component_cards if card.is_chosen()
         )
         self.total_label.setText(f"Download size: about {format_size(total)}")
-
-    def _gpu_page(self):
-        page, layout = self._page_shell(
-            "Your graphics card",
-            "Image Creation runs on your own PC, so what it can do depends on "
-            "this."
-        )
-        self.gpu_label = body_label("<p>Checking…</p>")
-        layout.addWidget(self.gpu_label)
-        layout.addStretch()
-        return page
-
-    def _refresh_gpu_page(self):
-        name, vram = detect_gpu()
-        advice = recommend_model(name, vram)
-        warning = (f"<p><span class='hl'>Worth knowing:</span> {advice['warn']}</p>"
-                   if advice["warn"] else "")
-        self.gpu_label.setText(rich_text(f"""
-            <p class="big">{advice['headline']}</p>
-            <p>{advice['detail']}</p>
-            {warning}
-            <p class="small">Recommended to start with:
-               <b>{advice['recommended']}</b>. Every model is selectable inside
-               the app whatever this says - this is a suggestion, not a limit.
-               Models download the first time you use them.</p>
-        """))
 
     def _location_page(self):
         page, layout = self._page_shell("Where to install", "And what shortcuts to make.")
@@ -864,22 +715,15 @@ class Installer(QWidget):
     # -- navigation -------------------------------------------------------------
 
     @property
-    def gpu_index(self):
-        return len(PAGES) + 1
-
-    @property
     def progress_index(self):
-        return len(PAGES) + 3
+        return len(PAGES) + 2
 
     @property
     def finish_index(self):
-        return len(PAGES) + 4
+        return len(PAGES) + 3
 
     def chosen_components(self):
         return [card.component for card in self.component_cards if card.is_chosen()]
-
-    def _wants_generation(self):
-        return any(item.get("needs_gpu") for item in self.chosen_components())
 
     def _update_footer(self):
         index = self.stack.currentIndex()
@@ -906,20 +750,11 @@ class Installer(QWidget):
             self.start_install()
             return
 
-        next_index = index + 1
-        # The graphics card page is only relevant if Image Creation is wanted.
-        if next_index == self.gpu_index and not self._wants_generation():
-            next_index += 1
-        elif next_index == self.gpu_index:
-            self._refresh_gpu_page()
-        self.stack.setCurrentIndex(next_index)
+        self.stack.setCurrentIndex(index + 1)
         self._update_footer()
 
     def go_back(self):
-        index = self.stack.currentIndex() - 1
-        if index == self.gpu_index and not self._wants_generation():
-            index -= 1
-        self.stack.setCurrentIndex(max(0, index))
+        self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
         self._update_footer()
 
     # -- installing ---------------------------------------------------------------

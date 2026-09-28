@@ -24,13 +24,3 @@ onnxruntime
 
 # Building the exe
 pyinstaller>=6
-
-# Image Creation tab - local Stable Diffusion. Big installs (several GB) and
-# not required for anything else, so they're commented out by default.
-# With an NVIDIA card, install torch from PyTorch's own index first:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu121
-# torch
-# diffusers
-# transformers
-# accelerate
-# safetensors

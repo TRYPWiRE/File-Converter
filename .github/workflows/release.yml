@@ -5,7 +5,8 @@
 #   1. Set APP_VERSION in image_to_png_converter.py (e.g. 1.10.0)
 #   2. git tag v1.10.0 && git push origin v1.10.0
 #   3. Watch the Actions tab. When it finishes, the release exists with the
-#      .exe files attached, and the app starts offering the update.
+#      app (ImageGen.zip), installer and updater attached, and the app starts
+#      offering the update.
 #
 # Building here takes roughly 10-15 minutes.
 
@@ -51,7 +52,7 @@ jobs:
       - name: Build the app
         run: |
           python prepare_icon.py
-          python -m PyInstaller --onefile --windowed --clean --noconfirm `
+          python -m PyInstaller --onedir --windowed --clean --noconfirm `
             --name ImageGen `
             --collect-all pillow_heif --collect-all PIL `
             --hidden-import PyQt6.QtWebEngineWidgets `
@@ -59,6 +60,7 @@ jobs:
             --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
             --icon app_icon.ico `
             image_to_png_converter.py
+          python zip_app.py
 
       - name: Build the installer and updater
         run: |
@@ -79,7 +81,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/ImageGen.exe
+            dist/ImageGen.zip
             dist/ImageGenSetup.exe
             dist/ImageGenUpdater.exe
             dist/extension_*.zip

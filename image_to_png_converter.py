@@ -106,6 +106,15 @@ from urllib.parse import quote, unquote_to_bytes, urlparse
 EXTENSIONS_DIRNAME = "extensions"
 
 
+def module_available(name):
+    """Whether a package can be imported, without the cost of importing it."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def app_folder():
     return os.path.dirname(os.path.abspath(
         sys.executable if getattr(sys, "frozen", False) else __file__))
@@ -364,16 +373,26 @@ except ImportError:
 # moviepy 2.x dropped the ".editor" submodule some 1.x installs still use,
 # so try both import paths. The exact error is kept so the Video to GIF
 # tab can show *why* it's unavailable, not just that it is.
+#
+# moviepy itself is only imported the first time a video is opened, which
+# keeps it (and the ffmpeg tooling it pulls in) off the app's startup.
 MOVIEPY_IMPORT_ERROR = None
-try:
-    from moviepy.editor import VideoFileClip
-except Exception as _exc:  # noqa: BLE001 - catch anything, not just ImportError
-    try:
-        from moviepy import VideoFileClip
-    except Exception as _exc2:  # noqa: BLE001
-        VideoFileClip = None
-        MOVIEPY_IMPORT_ERROR = f"{type(_exc2).__name__}: {_exc2}"
-MOVIEPY_AVAILABLE = VideoFileClip is not None
+MOVIEPY_AVAILABLE = module_available("moviepy")
+if not MOVIEPY_AVAILABLE:
+    MOVIEPY_IMPORT_ERROR = "ModuleNotFoundError: No module named 'moviepy'"
+_VIDEO_FILE_CLIP = None
+
+
+def VideoFileClip(*args, **kwargs):
+    """moviepy's VideoFileClip, imported on first use."""
+    global _VIDEO_FILE_CLIP
+    if _VIDEO_FILE_CLIP is None:
+        try:
+            from moviepy.editor import VideoFileClip as clip_class
+        except Exception:  # noqa: BLE001 - moviepy 2 dropped moviepy.editor
+            from moviepy import VideoFileClip as clip_class
+        _VIDEO_FILE_CLIP = clip_class
+    return _VIDEO_FILE_CLIP(*args, **kwargs)
 
 
 def resource_path(relative_path):
@@ -476,7 +495,7 @@ def installed_components():
 
 
 APP_TITLE = "ImageGen"
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 
 # Update checking - looks at GitHub Releases for this repo. Create releases
 # there with tags like "v1.1.0" and this will detect anything newer than
@@ -8462,12 +8481,9 @@ CUTOUT_DEFAULT_BRUSH = 40
 # is downloaded once, on first use, and cached.
 # ---------------------------------------------------------------------------
 
-try:
-    import onnxruntime
-    ONNX_AVAILABLE = True
-except ImportError:
-    onnxruntime = None
-    ONNX_AVAILABLE = False
+# onnxruntime is a large library, so it's only imported when the AI cutout
+# is first used rather than every time the app starts.
+ONNX_AVAILABLE = module_available("onnxruntime")
 
 AI_MODEL_RELEASE = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/"
 
@@ -8523,6 +8539,7 @@ def download_ai_model(file_name, progress=None):
 def ai_session(file_name):
     """Loads (and caches) an onnxruntime session for a model file."""
     if file_name not in _AI_SESSIONS:
+        import onnxruntime
         _AI_SESSIONS[file_name] = onnxruntime.InferenceSession(
             ai_model_path(file_name), providers=["CPUExecutionProvider"]
         )
@@ -10295,16 +10312,19 @@ class UpdateCheckWorker(QRunnable):
                 return
 
             if _parse_version(latest_tag) > _parse_version(APP_VERSION):
-                # Find the app .exe among the release's files, so the
-                # updater can fetch it directly instead of sending the
-                # user to a web page.
+                # Find the app among the release's files, so the updater can
+                # fetch it directly instead of sending the user to a web
+                # page. The zipped app folder is preferred; a single .exe is
+                # what older releases have.
                 download_url = ""
                 for asset in data.get("assets", []):
                     name = (asset.get("name") or "").lower()
-                    if name.endswith(".exe") and "setup" not in name and \
-                            "updater" not in name:
+                    if name == f"{APP_TITLE.lower()}.zip":
                         download_url = asset.get("browser_download_url", "")
                         break
+                    if not download_url and name.endswith(".exe") and \
+                            "setup" not in name and "updater" not in name:
+                        download_url = asset.get("browser_download_url", "")
                 self.signals.update_available.emit({
                     "version": latest_tag,
                     "download_url": download_url,

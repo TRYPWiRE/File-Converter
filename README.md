@@ -100,7 +100,7 @@ Make sure `FClogo.png` is in the same folder as the script — it's used for the
 
 A `build.bat` script is included that handles this for you:
 
-1. Put `build.bat`, `prepare_icon.py`, `image_to_png_converter.py` and your logo (`iGlogo.png` and `iGlogo.ico`, or the older `FClogo` files) in the same folder
+1. Put `build.bat`, `prepare_icon.py`, `zip_app.py`, `image_to_png_converter.py` and your logo (`iGlogo.png` and `iGlogo.ico`, or the older `FClogo` files) in the same folder
 2. Double-click `build.bat`
 
 It will:
@@ -108,7 +108,9 @@ It will:
 - Check that this Python environment actually has `moviepy`/`imageio-ffmpeg` (a common gotcha if you have multiple Python installs)
 - Check for (and install if missing) the Web Images / Flipbook / AVIF dependencies
 - Use `FClogo.ico` as the exe, window and taskbar icon exactly as supplied (one is only generated from the PNG if the `.ico` is missing), and bundle both logo files into the exe
-- Produce `dist\File Converter - by Tryppy.exe`
+- Produce the app as a folder, `dist\ImageGen\` (run `ImageGen.exe` inside it, and keep the `_internal` folder next to it), plus `dist\ImageGen.zip` of that folder for a GitHub release
+
+The app is built as a folder rather than one single `.exe` on purpose: a single `.exe` has to unpack itself into a temp folder every time it starts, which made opening the app take 20-40 seconds. The folder version starts in a couple of seconds.
 
 You can re-run `build.bat` any time after making changes — it cleans up old build artifacts automatically.
 
@@ -117,9 +119,9 @@ You can re-run `build.bat` any time after making changes — it cleans up old bu
 The app checks this repo's [Releases](../../releases) page for newer versions. To ship an update:
 
 1. Bump `APP_VERSION` near the top of `image_to_png_converter.py`
-2. Publish a new GitHub Release with a matching tag (e.g. `v1.1.0`)
+2. Publish a new GitHub Release with a matching tag (e.g. `v1.1.0`), with `ImageGen.zip`, `ImageGenSetup.exe` and `ImageGenUpdater.exe` attached (the release workflow does this for you when you push the tag)
 
-Users running an older version will be notified automatically and can jump straight to the release page to download the update.
+Users running an older version are notified automatically, and the updater downloads `ImageGen.zip` and swaps the new version in.
 
 ## License
 

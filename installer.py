@@ -71,7 +71,12 @@ GITHUB = {
 # The main program. Downloaded first, always.
 CORE_ASSET = {
     "name": "Core application",
-    "asset": "ImageGen.exe",
+    # The app ships as a zipped folder (ImageGen.exe plus _internal/), which
+    # starts far faster than a single self-unpacking .exe. "legacy_asset" is
+    # used for older releases that only have the single .exe.
+    "asset": "ImageGen.zip",
+    "legacy_asset": "ImageGen.exe",
+    "exe": "ImageGen.exe",
     "size_mb": 120,
     "description": "The app itself, plus the image and GIF converters.",
 }
@@ -377,12 +382,14 @@ class InstallWorker(QRunnable):
             # The core app is required. The updater is strongly wanted but
             # the install is still usable without it. Components are only
             # fetched if they ship separately and are actually published.
-            jobs = [(CORE_ASSET["asset"], True), ("ImageGenUpdater.exe", False)]
+            self.signals.status.emit("Checking what's available…")
+            core = CORE_ASSET["asset"]
+            if not asset_exists(core) and asset_exists(CORE_ASSET["legacy_asset"]):
+                core = CORE_ASSET["legacy_asset"]
+            jobs = [(core, True), ("ImageGenUpdater.exe", False)]
             for item in self.chosen:
                 if not item.get("bundled"):
                     jobs.append((item["asset"], False))
-
-            self.signals.status.emit("Checking what's available…")
             jobs = [(asset, required) for asset, required in jobs
                     if required or asset_exists(asset)]
 
@@ -392,6 +399,11 @@ class InstallWorker(QRunnable):
                     self._download(asset, destination, index, len(jobs))
                     if asset.endswith(".zip"):
                         self.signals.status.emit(f"Unpacking {asset}…")
+                        if asset == CORE_ASSET["asset"]:
+                            # Clear out the previous version's libraries, so
+                            # a reinstall doesn't leave stale files mixed in.
+                            shutil.rmtree(os.path.join(self.target_dir, "_internal"),
+                                          ignore_errors=True)
                         shutil.unpack_archive(destination, self.target_dir)
                         os.remove(destination)
                 except Exception as exc:  # noqa: BLE001
@@ -429,7 +441,7 @@ def write_component_manifest(target_dir, chosen):
 def create_shortcuts(target_dir, shortcuts, failures):
     """Makes .lnk files through a short VBScript, which avoids needing any
     extra Python packages."""
-    exe = os.path.join(target_dir, CORE_ASSET["asset"])
+    exe = os.path.join(target_dir, CORE_ASSET["exe"])
     icon = os.path.join(target_dir, BRAND["logo_ico"])
     places = []
     if shortcuts.get("desktop"):

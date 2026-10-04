@@ -125,14 +125,16 @@ if exist dist rmdir /s /q dist
 if exist "%APP_NAME%.spec" del /q "%APP_NAME%.spec"
 
 echo.
-echo Building "%APP_NAME%.exe" ...
-echo (This takes longer than before - the embedded browser is large.)
+echo Building "%APP_NAME%" ...
+echo It's built as a folder rather than one big .exe: a single .exe has to
+echo unpack itself into a temp folder every time it starts, which is what
+echo made the app take 20-40 seconds to open.
 echo.
 
 echo Icon argument: %ICON_ARG%
 echo.
 
-python -m PyInstaller --onefile --windowed --clean --noconfirm --name "%APP_NAME%" ^
+python -m PyInstaller --onedir --windowed --clean --noconfirm --name "%APP_NAME%" ^
     --collect-all rawpy ^
     --collect-all pillow_heif ^
     --collect-all moviepy ^
@@ -159,9 +161,19 @@ if errorlevel 1 (
 )
 
 echo.
+echo Packing the app folder into dist\%APP_NAME%.zip for the release...
+python zip_app.py
+if errorlevel 1 (
+    echo WARNING: couldn't make the .zip - the app folder itself is fine.
+)
+
+echo.
 echo ============================================================
 echo  Build complete!
-echo  Your exe is here: dist\%APP_NAME%.exe
+echo  Run it from here:   dist\%APP_NAME%\%APP_NAME%.exe
+echo  Keep the whole dist\%APP_NAME% folder together - the .exe
+echo  needs the _internal folder next to it.
+echo  For a GitHub release, upload dist\%APP_NAME%.zip
 echo ============================================================
 echo.
 echo Refreshing the Windows icon cache so the new icon shows without

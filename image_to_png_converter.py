@@ -54,9 +54,6 @@ Behavior:
   secondary nav bar inside the tab. Browse a page, collect every image it
   actually renders, preview them and save as PNG/GIF/WebP/AVIF, or send
   two of them into the Overlay Studio to composite one over the other
-- "Image Creation" tab: local Stable Diffusion image generation (FLUX.1,
-  SD3.5, SDXL...) from a description, optionally starting from reference
-  images. Needs PyTorch + diffusers, which are not bundled
 - "Background Remover" tab: click a background away, brush out the rest,
   and save the result as PNG/WebP/AVIF with real transparency. Uses an
   built-in AI subject detection (U^2-Net via onnxruntime)
@@ -107,6 +104,15 @@ from urllib.parse import quote, unquote_to_bytes, urlparse
 # ---------------------------------------------------------------------------
 
 EXTENSIONS_DIRNAME = "extensions"
+
+
+def module_available(name):
+    """Whether a package can be imported, without the cost of importing it."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def app_folder():
@@ -367,16 +373,26 @@ except ImportError:
 # moviepy 2.x dropped the ".editor" submodule some 1.x installs still use,
 # so try both import paths. The exact error is kept so the Video to GIF
 # tab can show *why* it's unavailable, not just that it is.
+#
+# moviepy itself is only imported the first time a video is opened, which
+# keeps it (and the ffmpeg tooling it pulls in) off the app's startup.
 MOVIEPY_IMPORT_ERROR = None
-try:
-    from moviepy.editor import VideoFileClip
-except Exception as _exc:  # noqa: BLE001 - catch anything, not just ImportError
-    try:
-        from moviepy import VideoFileClip
-    except Exception as _exc2:  # noqa: BLE001
-        VideoFileClip = None
-        MOVIEPY_IMPORT_ERROR = f"{type(_exc2).__name__}: {_exc2}"
-MOVIEPY_AVAILABLE = VideoFileClip is not None
+MOVIEPY_AVAILABLE = module_available("moviepy")
+if not MOVIEPY_AVAILABLE:
+    MOVIEPY_IMPORT_ERROR = "ModuleNotFoundError: No module named 'moviepy'"
+_VIDEO_FILE_CLIP = None
+
+
+def VideoFileClip(*args, **kwargs):
+    """moviepy's VideoFileClip, imported on first use."""
+    global _VIDEO_FILE_CLIP
+    if _VIDEO_FILE_CLIP is None:
+        try:
+            from moviepy.editor import VideoFileClip as clip_class
+        except Exception:  # noqa: BLE001 - moviepy 2 dropped moviepy.editor
+            from moviepy import VideoFileClip as clip_class
+        _VIDEO_FILE_CLIP = clip_class
+    return _VIDEO_FILE_CLIP(*args, **kwargs)
 
 
 def resource_path(relative_path):
@@ -443,14 +459,12 @@ COMPONENT_TABS = {
     "Web Images": "web_images",
     "WebP Flipbook": "flipbook",
     "Background Remover": "background_remover",
-    "Image Creation": "image_creation",
 }
 COMPONENT_NAMES = {
     "video_tools": "Video tools",
     "web_images": "Web Images",
     "flipbook": "WebP Flipbook",
     "background_remover": "Background Remover",
-    "image_creation": "Image Creation",
 }
 
 
@@ -481,7 +495,7 @@ def installed_components():
 
 
 APP_TITLE = "ImageGen"
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.13.0"
 
 # Update checking - looks at GitHub Releases for this repo. Create releases
 # there with tags like "v1.1.0" and this will detect anything newer than
@@ -8467,12 +8481,9 @@ CUTOUT_DEFAULT_BRUSH = 40
 # is downloaded once, on first use, and cached.
 # ---------------------------------------------------------------------------
 
-try:
-    import onnxruntime
-    ONNX_AVAILABLE = True
-except ImportError:
-    onnxruntime = None
-    ONNX_AVAILABLE = False
+# onnxruntime is a large library, so it's only imported when the AI cutout
+# is first used rather than every time the app starts.
+ONNX_AVAILABLE = module_available("onnxruntime")
 
 AI_MODEL_RELEASE = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/"
 
@@ -8528,6 +8539,7 @@ def download_ai_model(file_name, progress=None):
 def ai_session(file_name):
     """Loads (and caches) an onnxruntime session for a model file."""
     if file_name not in _AI_SESSIONS:
+        import onnxruntime
         _AI_SESSIONS[file_name] = onnxruntime.InferenceSession(
             ai_model_path(file_name), providers=["CPUExecutionProvider"]
         )
@@ -9573,1215 +9585,6 @@ class BackgroundRemoverUnavailableTab(QWidget):
         layout.addWidget(box, 1)
 
 
-# ---------------------------------------------------------------------------
-# Image Creation tab
-#
-# Local text-to-image generation through Stable Diffusion. Everything runs on
-# this machine - the model is downloaded once and then used offline, and no
-# prompt or image ever leaves the PC.
-#
-# The heavy lifting is done by PyTorch + diffusers, which are big installs and
-# not bundled. When they're missing the tab explains how to add them instead
-# of disappearing.
-#
-# load_generation_pipeline() and run_generation_pipeline() are deliberately
-# the only two places that touch diffusers, which keeps everything else in
-# this tab testable without a model present.
-# ---------------------------------------------------------------------------
-
-# Catch everything, not just ImportError: a torch that's installed but can't
-# load its DLLs raises OSError instead, and "installed yet unusable" needs to
-# be reported rather than crashing the app or looking like "not installed".
-TORCH_IMPORT_ERROR = None
-DIFFUSERS_IMPORT_ERROR = None
-
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except Exception as _exc:  # noqa: BLE001
-    torch = None
-    TORCH_AVAILABLE = False
-    TORCH_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
-
-try:
-    import diffusers  # noqa: F401
-    DIFFUSERS_AVAILABLE = True
-except Exception as _exc:  # noqa: BLE001
-    DIFFUSERS_AVAILABLE = False
-    DIFFUSERS_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
-
-GENERATION_AVAILABLE = TORCH_AVAILABLE and DIFFUSERS_AVAILABLE
-
-# PyTorch publishes each CUDA build on its own index. cu121 was retired, and
-# the older indexes never got wheels for the newest Pythons - which is what
-# "No matching distribution found for torch" usually means. These are the
-# builds PyTorch currently offers; the picker on their site is the last word.
-TORCH_CUDA_INDEXES = [
-    ("CUDA 12.8 — newest NVIDIA cards", "cu128"),
-    ("CUDA 12.6 — most NVIDIA cards", "cu126"),
-    ("CUDA 11.8 — older NVIDIA cards", "cu118"),
-]
-TORCH_SELECTOR_URL = "https://pytorch.org/get-started/locally/"
-GENERATION_PACKAGES = "diffusers transformers accelerate safetensors"
-
-
-def refresh_generation_backend():
-    """Re-checks for torch/diffusers so they can be installed without
-    restarting the app."""
-    global torch, TORCH_AVAILABLE, DIFFUSERS_AVAILABLE, GENERATION_AVAILABLE
-    global TORCH_IMPORT_ERROR, DIFFUSERS_IMPORT_ERROR
-    import importlib
-    try:
-        importlib.invalidate_caches()
-        torch = importlib.import_module("torch")
-        TORCH_AVAILABLE = True
-        TORCH_IMPORT_ERROR = None
-    except Exception as exc:  # noqa: BLE001
-        TORCH_AVAILABLE = False
-        TORCH_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
-    try:
-        importlib.import_module("diffusers")
-        DIFFUSERS_AVAILABLE = True
-        DIFFUSERS_IMPORT_ERROR = None
-    except Exception as exc:  # noqa: BLE001
-        DIFFUSERS_AVAILABLE = False
-        DIFFUSERS_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
-    GENERATION_AVAILABLE = TORCH_AVAILABLE and DIFFUSERS_AVAILABLE
-    return GENERATION_AVAILABLE
-
-
-def python_description():
-    bits = 64 if sys.maxsize > 2 ** 32 else 32
-    version = ".".join(str(part) for part in sys.version_info[:3])
-    return f"Python {version} ({bits}-bit)"
-
-
-def generation_diagnostics():
-    """Everything needed to work out why the packages aren't being found.
-
-    By far the most common cause is more than one Python on the machine: pip
-    puts the packages in one, while the app runs in another, so pip keeps
-    saying "already satisfied" while the app keeps saying "not installed".
-    """
-    lines = [
-        f"App is running in: {sys.executable or 'unknown'}",
-        f"Version: {python_description()}",
-        f"Packaged .exe: {'yes' if getattr(sys, 'frozen', False) else 'no'}",
-        "",
-        f"PyTorch: {'found' if TORCH_AVAILABLE else 'not usable'}",
-    ]
-    if TORCH_IMPORT_ERROR and not TORCH_AVAILABLE:
-        lines.append(f"    {TORCH_IMPORT_ERROR}")
-    if TORCH_AVAILABLE:
-        lines.append(f"    version {getattr(torch, '__version__', '?')}, "
-                     f"CUDA available: {bool(torch.cuda.is_available())}")
-    lines.append(f"diffusers: {'found' if DIFFUSERS_AVAILABLE else 'not usable'}")
-    if DIFFUSERS_IMPORT_ERROR and not DIFFUSERS_AVAILABLE:
-        lines.append(f"    {DIFFUSERS_IMPORT_ERROR}")
-        if "metadata" in DIFFUSERS_IMPORT_ERROR.lower():
-            lines.append("")
-            lines.append(
-                "    That's a packaging problem, not a missing install: the "
-                "code was bundled but its package metadata wasn't, and "
-                "diffusers/transformers read that at import. Rebuild with an "
-                "up-to-date build.bat, which passes --recursive-copy-metadata "
-                "for them."
-            )
-    if TORCH_AVAILABLE and not torch.cuda.is_available():
-        lines.append("")
-        build = getattr(torch, "__version__", "")
-        if "+cpu" in build:
-            lines.append(
-                f"    PyTorch {build} is the CPU-only build, so generation "
-                "would run on the processor - minutes per image. For GPU "
-                "speed, reinstall from a CUDA index (see the panel)."
-            )
-        else:
-            lines.append(
-                "    PyTorch can't see a usable GPU, so generation would run "
-                "on the processor."
-            )
-
-    lines.append("")
-    lines.append("Where Python looks for packages:")
-    for path in sys.path[:8]:
-        lines.append(f"    {path or '(current folder)'}")
-    return "\n".join(lines)
-
-
-def generation_install_command():
-    """A pip command tied to this exact interpreter, which sidesteps the
-    'installed into a different Python' trap."""
-    executable = sys.executable or "python"
-    if getattr(sys, "frozen", False):
-        executable = "python"
-    quoted = f'"{executable}"' if " " in executable else executable
-    return (f"{quoted} -m pip install torch --index-url "
-            f"https://download.pytorch.org/whl/cu126 && "
-            f"{quoted} -m pip install {GENERATION_PACKAGES}")
-
-
-def generation_install_help():
-    """What to actually run, for this Python, right now."""
-    lines = []
-    if getattr(sys, "frozen", False):
-        lines.append(
-            "This is the packaged .exe, which carries its own copy of Python. "
-            "Installing packages with pip won't reach it — image generation "
-            "has to be installed into the Python you build the app with, and "
-            "then the app rebuilt. Running the app from "
-            "image_to_png_converter.py instead is the easier route."
-        )
-        lines.append("")
-
-    lines.append(f"Generating images needs PyTorch and diffusers. This app is "
-                 f"running {python_description()} from:")
-    lines.append(f"    {sys.executable or 'unknown'}")
-    lines.append("")
-    lines.append("If pip keeps saying \"Requirement already satisfied\" while this "
-                 "still says they're missing, they went into a different Python. "
-                 "Use the button below, which installs into the one above.")
-    lines.append("")
-    lines.append("With an NVIDIA graphics card, pick the CUDA build that suits it:")
-    for label, tag in TORCH_CUDA_INDEXES:
-        lines.append(f"    pip install torch --index-url "
-                     f"https://download.pytorch.org/whl/{tag}      ({label})")
-    lines.append("")
-    lines.append("Without one (slower, but it works):")
-    lines.append("    pip install torch")
-    lines.append("")
-    lines.append("Then, either way:")
-    lines.append(f"    pip install {GENERATION_PACKAGES}")
-    lines.append("")
-
-    if sys.version_info >= (3, 13):
-        lines.append(
-            "Note: Python 3.13+ is new enough that some CUDA builds may not "
-            "have wheels for it yet. If every command above says \"No matching "
-            "distribution found\", that's why — use the picker on "
-            f"{TORCH_SELECTOR_URL} to see what's available, or install "
-            "Python 3.12 alongside and run the app with that."
-        )
-    else:
-        lines.append(
-            "If pip says \"No matching distribution found for torch\", that "
-            "CUDA build has no wheel for your Python. Use the picker on "
-            f"{TORCH_SELECTOR_URL} to get the exact command."
-        )
-    lines.append("")
-    lines.append("Restart the app afterwards, or press Check again.")
-    return "\n".join(lines)
-
-# The models, roughly best-first. "family" decides how the pipeline is
-# driven, because FLUX and SD3 take different arguments to SD/SDXL.
-#
-# Nothing that runs on a home PC matches a hosted model like GPT-4o's image
-# generation - those are far larger and run on datacentre hardware. FLUX.1 is
-# the closest thing available to run locally, and it's very good, but it wants
-# a strong GPU. The lighter models below are there for when it doesn't fit.
-GENERATION_MODELS = {
-    "FLUX.1 schnell — closest to online models": {
-        "id": "black-forest-labs/FLUX.1-schnell",
-        "size": 1024, "family": "flux", "steps": 4, "guidance": 0,
-            "note": "About 24 GB to download, and happiest with 12 GB+ of video memory. "
-        "Only needs a few steps. Free, but you have to accept its terms on "
-        "the model's page and add a Hugging Face token first.",
-    },
-    "FLUX.1 dev — best quality, slower": {
-        "id": "black-forest-labs/FLUX.1-dev",
-        "size": 1024, "family": "flux", "steps": 28, "guidance": 4,
-            "note": "About 24 GB, 12 GB+ of video memory, and you have to accept its "
-        "licence on the model's page before it will download.",
-    },
-    "SD 3.5 Medium — strong, lighter": {
-        "id": "stabilityai/stable-diffusion-3.5-medium",
-        "size": 1024, "family": "sd3", "steps": 28, "guidance": 5,
-            "note": "About 5 GB. Needs the licence accepting on the model's page first.",
-    },
-    "SDXL 1.0 — reliable, no sign-up": {
-        "id": "stabilityai/stable-diffusion-xl-base-1.0",
-        "size": 1024, "family": "sdxl", "steps": 25, "guidance": 7,
-            "note": "About 7 GB. Works anywhere, no sign-up needed.",
-    },
-    "SDXL Turbo — fast": {
-        "id": "stabilityai/sdxl-turbo",
-        "size": 512, "family": "sdxl", "steps": 4, "guidance": 0,
-            "note": "About 7 GB. Built for 1-4 steps, so it is quick.",
-    },
-    "SD Turbo — fastest, smallest": {
-        "id": "stabilityai/sd-turbo",
-        "size": 512, "family": "sd", "steps": 4, "guidance": 0,
-            "note": "About 2.5 GB. The one to try on a modest PC or without a GPU.",
-    },
-    "Dreamshaper 8 — light all-rounder": {
-        "id": "Lykon/dreamshaper-8",
-        "size": 512, "family": "sd", "steps": 25, "guidance": 7,
-            "note": "About 2 GB. An older but well-liked general model.",
-    },
-    "Custom model…": {
-        "id": "", "size": 1024, "family": "sdxl", "steps": 25, "guidance": 7,
-            "note": "Any model id from Hugging Face, or a folder on this PC.",
-    },
-}
-
-# Families that are too big to sit in VRAM comfortably; diffusers can shuffle
-# their parts on and off the GPU as needed instead of failing outright.
-LARGE_FAMILIES = {"flux", "sd3"}
-
-GENERATION_SIZES = ["512 × 512", "768 × 768", "1024 × 1024",
-                    "768 × 512 (landscape)", "512 × 768 (portrait)",
-                    "1024 × 576 (16:9)", "576 × 1024 (9:16)"]
-
-_GENERATION_PIPELINES = {}
-
-
-class GenerationCancelled(Exception):
-    """Raised inside the model's per-step callback to stop early."""
-
-
-def generation_device():
-    """cuda when there's a usable GPU, otherwise cpu."""
-    if TORCH_AVAILABLE and torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
-def generation_device_description():
-    if not GENERATION_AVAILABLE:
-        return "not installed"
-    if generation_device() == "cuda":
-        try:
-            return f"GPU — {torch.cuda.get_device_name(0)}"
-        except Exception:  # noqa: BLE001
-            return "GPU"
-    if TORCH_AVAILABLE and "+cpu" in getattr(torch, "__version__", ""):
-        return ("CPU only — this is the CPU build of PyTorch, so expect "
-                "minutes per image. Reinstall it from a CUDA index for GPU speed.")
-    return "CPU only — expect minutes per image rather than seconds"
-
-
-def huggingface_token():
-    """A saved token, falling back to the standard environment variables so
-    an existing Hugging Face login keeps working."""
-    settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
-    saved = (settings.value("hf_token", "") or "").strip()
-    return saved or os.environ.get("HF_TOKEN", "") or os.environ.get(
-        "HUGGING_FACE_HUB_TOKEN", "")
-
-
-class ModelAccessError(Exception):
-    """The model can't be downloaded with the current token. The message
-    says what to do about it."""
-
-
-def check_model_access(model_id):
-    """Asks Hugging Face whether this model can be downloaded, before
-    starting a multi-gigabyte download that would only fail.
-
-    Raises ModelAccessError with step-by-step instructions when it can't.
-    Anything inconclusive (no internet, an old huggingface_hub, a local
-    folder, a model already downloaded) is let through for the download
-    itself to report.
-    """
-    if not model_id or os.path.isdir(model_id):
-        return
-    try:
-        from huggingface_hub import auth_check, try_to_load_from_cache
-        from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
-    except ImportError:
-        return
-    try:
-        if isinstance(try_to_load_from_cache(model_id, "model_index.json"), str):
-            return  # already downloaded, works offline
-    except Exception:  # noqa: BLE001
-        pass
-
-    token = huggingface_token() or None
-    page = f"https://huggingface.co/{model_id}"
-    try:
-        auth_check(model_id, token=token)
-    except GatedRepoError:
-        if token:
-            raise ModelAccessError(
-                f"Your Hugging Face token doesn't have access to {model_id} "
-                "yet.\n\n"
-                f"1. Open {page} while signed in to the same Hugging Face "
-                "account the token belongs to.\n"
-                "2. Accept the terms at the top of the page (\"Agree and access "
-                "repository\").\n"
-                "3. Try again - access is usually granted instantly."
-            ) from None
-        raise ModelAccessError(
-            f"{model_id} is free, but Hugging Face only lets you download it "
-            "once you've accepted its terms and the app has a token.\n\n"
-            "1. Sign in or make a free account at huggingface.co.\n"
-            f"2. Open {page} and accept the terms at the top of the page.\n"
-            "3. Create a token at huggingface.co/settings/tokens - the "
-            "\"Read\" type is enough.\n"
-            "4. Paste it into the HF token box in this tab's settings, then "
-            "try again.\n\n"
-            "Or pick SDXL or SD Turbo, which need none of this."
-        ) from None
-    except RepositoryNotFoundError:
-        if token:
-            raise ModelAccessError(
-                f"Hugging Face says {model_id} doesn't exist or your token "
-                "can't see it.\n\n"
-                "Check the model name, and that the token in the HF token box "
-                "is current - you can make a new one at "
-                "huggingface.co/settings/tokens."
-            ) from None
-        raise ModelAccessError(
-            f"Hugging Face says there's no model called {model_id}.\n\n"
-            "Check the name against the model's page. If it's a private or "
-            "gated model, add a token in the HF token box first."
-        ) from None
-    except Exception:  # noqa: BLE001
-        return
-
-
-def explain_model_error(message, model_id):
-    """Turns a diffusers/hub error into something you can act on."""
-    prefix = "ModelAccessError: "
-    if message.startswith(prefix):
-        return message[len(prefix):].split("\n\nTraceback", 1)[0]
-    lowered = message.lower()
-    if ("not a valid model identifier" in lowered or "401" in lowered
-            or "403" in lowered or "gated" in lowered or "restricted" in lowered):
-        return (
-            f"Couldn't fetch {model_id}.\n\n"
-            "The usual reasons, most likely first:\n\n"
-            "1. The model needs its licence accepting. Both FLUX.1 models and "
-            "SD 3.5 are gated - open the model's page on huggingface.co while signed "
-            "in, accept the terms, then paste an access token into the HF "
-            "token box in Settings.\n\n"
-            "2. No internet, or it's being blocked. The first use of a model "
-            "downloads it, so a firewall or proxy will stop it.\n\n"
-            "3. The name is wrong - if you typed a custom one, check it "
-            "against the model's page.\n\n"
-            "SDXL and SD Turbo need no token, so if those fail "
-            "too it's almost certainly the connection."
-        )
-    if "out of memory" in lowered or "cuda oom" in lowered:
-        return ("The graphics card ran out of memory.\n\n"
-                "Try a smaller model, or a smaller output size.")
-    return message
-
-
-def load_generation_pipeline(model_id, use_img2img, family="sdxl"):
-    """Loads (and caches) a diffusers pipeline. The model downloads itself on
-    first use into the usual Hugging Face cache folder, then runs offline."""
-    from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
-
-    device = generation_device()
-    key = (model_id, use_img2img, device)
-    if key in _GENERATION_PIPELINES:
-        return _GENERATION_PIPELINES[key]
-
-    if device == "cuda":
-        # bfloat16 is what FLUX and SD3 are built for; fp16 suits the rest.
-        dtype = torch.bfloat16 if family in LARGE_FAMILIES else torch.float16
-    else:
-        dtype = torch.float32
-
-    base_key = (model_id, False, device)
-    if use_img2img and base_key in _GENERATION_PIPELINES:
-        # Reuses the weights already in memory rather than a second copy.
-        pipeline = AutoPipelineForImage2Image.from_pipe(_GENERATION_PIPELINES[base_key])
-    else:
-        loader = AutoPipelineForImage2Image if use_img2img else AutoPipelineForText2Image
-        arguments = {"torch_dtype": dtype}
-        if family in ("sd", "sdxl"):
-            arguments["safety_checker"] = None
-        # FLUX.1 dev and SD 3.5 sit behind a licence you accept on their page,
-        # and then only download with an access token.
-        token = huggingface_token()
-        if token:
-            arguments["token"] = token
-        pipeline = loader.from_pretrained(model_id, **arguments)
-
-        offloaded = False
-        if device == "cuda" and family in LARGE_FAMILIES:
-            try:
-                # Keeps only the part that's working on the GPU, so the big
-                # models still run on a card that couldn't hold them whole.
-                pipeline.enable_model_cpu_offload()
-                offloaded = True
-            except Exception:  # noqa: BLE001
-                offloaded = False
-        if not offloaded:
-            pipeline = pipeline.to(device)
-
-        for tweak in ("enable_attention_slicing", "enable_vae_tiling"):
-            try:
-                getattr(pipeline, tweak)()
-            except Exception:  # noqa: BLE001
-                pass
-
-    _GENERATION_PIPELINES[key] = pipeline
-    return pipeline
-
-
-def run_generation_pipeline(pipeline, request, on_step):
-    """Runs one generation and returns a PIL image.
-
-    on_step(step, total) is called as it goes and may raise
-    GenerationCancelled to stop.
-    """
-    generator = None
-    if request.get("seed") is not None:
-        generator = torch.Generator(device=generation_device())
-        generator.manual_seed(int(request["seed"]))
-
-    steps = request["steps"]
-
-    def callback(pipe, step_index, timestep, callback_kwargs):
-        on_step(step_index + 1, steps)
-        return callback_kwargs
-
-    arguments = {
-        "prompt": request["prompt"],
-        "num_inference_steps": steps,
-        "guidance_scale": request["guidance"],
-        "generator": generator,
-        "callback_on_step_end": callback,
-    }
-    # FLUX has no negative prompt - it's distilled without one - so passing
-    # it through would just raise.
-    if request.get("negative_prompt") and request.get("family") != "flux":
-        arguments["negative_prompt"] = request["negative_prompt"]
-    if request.get("family") == "flux":
-        arguments["max_sequence_length"] = 256
-
-    init_image = request.get("init_image")
-    if init_image is not None:
-        arguments["image"] = init_image
-        arguments["strength"] = request["strength"]
-    else:
-        arguments["width"], arguments["height"] = request["size"]
-
-    return pipeline(**arguments).images[0]
-
-
-def blend_reference_images(images, size):
-    """Combines reference images into a single starting picture.
-
-    Each one is cropped to fill the output shape and then averaged together,
-    so two references genuinely mix rather than one hiding the other.
-    """
-    if not images:
-        return None
-    prepared = [
-        resize_to_spec(image, {"size": size, "mode": "fill", "upscale": True}).convert("RGB")
-        for image in images
-    ]
-    blended = prepared[0]
-    for index, image in enumerate(prepared[1:], start=2):
-        # Equal weighting across however many were added.
-        blended = Image.blend(blended, image, 1.0 / index)
-    return blended
-
-
-class GenerationSignals(QObject):
-    progress = pyqtSignal(int, int)      # step, total
-    status = pyqtSignal(str)
-    finished = pyqtSignal(object, int)   # image, seed used
-    failed = pyqtSignal(str)
-    cancelled = pyqtSignal()
-
-
-class GenerationWorker(QRunnable):
-    """Loads the model if needed and generates one image, off the GUI thread."""
-
-    def __init__(self, request):
-        super().__init__()
-        self.request = request
-        self.signals = GenerationSignals()
-        self._cancel = False
-
-    def cancel(self):
-        self._cancel = True
-
-    def _on_step(self, step, total):
-        if self._cancel:
-            raise GenerationCancelled()
-        self.signals.progress.emit(step, total)
-
-    def run(self):
-        try:
-            self.signals.status.emit(
-                "Loading the model… the first time also downloads it, which "
-                "can take a while."
-            )
-            check_model_access(self.request["model_id"])
-            pipeline = load_generation_pipeline(
-                self.request["model_id"],
-                self.request.get("init_image") is not None,
-                self.request.get("family", "sdxl"),
-            )
-            if self._cancel:
-                self.signals.cancelled.emit()
-                return
-            self.signals.status.emit("Generating…")
-            image = run_generation_pipeline(pipeline, self.request, self._on_step)
-            self.signals.finished.emit(image, self.request["seed"])
-        except GenerationCancelled:
-            self.signals.cancelled.emit()
-        except Exception as exc:  # noqa: BLE001
-            self.signals.failed.emit(
-                f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc().rstrip()}")
-
-
-class ReferenceList(QListWidget):
-    """The reference images, shown as thumbnails."""
-
-    def __init__(self):
-        super().__init__()
-        self.setViewMode(QListWidget.IconMode)
-        self.setIconSize(QSize(84, 84))
-        self.setGridSize(QSize(96, 96))
-        self.setResizeMode(QListWidget.Adjust)
-        self.setMovement(QListWidget.Static)
-        self.setFixedHeight(120)
-        self.setSelectionMode(QListWidget.ExtendedSelection)
-        self.setAcceptDrops(True)
-        self.paths = []
-
-    def add_path(self, path):
-        try:
-            image = Image.open(path)
-            image.load()
-        except Exception:  # noqa: BLE001
-            return False
-        thumbnail = image.convert("RGBA")
-        thumbnail.thumbnail((84, 84), RESAMPLE_LANCZOS)
-        item = QListWidgetItem(QIcon(QPixmap.fromImage(pil_to_qimage(thumbnail))), "")
-        item.setToolTip(os.path.basename(path))
-        self.addItem(item)
-        self.paths.append(path)
-        return True
-
-    def remove_selected(self):
-        for item in self.selectedItems():
-            row = self.row(item)
-            self.takeItem(row)
-            del self.paths[row]
-
-    def clear_all(self):
-        self.clear()
-        self.paths = []
-
-    def images(self):
-        loaded = []
-        for path in self.paths:
-            try:
-                with Image.open(path) as image:
-                    loaded.append(image.convert("RGB").copy())
-            except Exception:  # noqa: BLE001
-                continue
-        return loaded
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            if url.isLocalFile():
-                self.add_path(url.toLocalFile())
-        event.acceptProposedAction()
-
-
-class ImageCreationTab(QWidget):
-    """Describe a picture, optionally hand it reference images, and generate
-    it locally."""
-
-    def __init__(self, main_window, parent=None):
-        super().__init__(parent)
-        self.main_window = main_window
-        self.result = None
-        self.worker = None
-        self.busy = False
-        self._build_ui()
-        self._update_controls()
-
-    # -- UI --------------------------------------------------------------------
-
-    def _build_ui(self):
-        root = QHBoxLayout(self)
-        root.setContentsMargins(22, 14, 22, 14)
-        root.setSpacing(18)
-
-        panel = QWidget()
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.setSpacing(14)
-        panel_layout.addWidget(self._build_prompt_group())
-        panel_layout.addWidget(self._build_reference_group())
-        panel_layout.addWidget(self._build_settings_group())
-        panel_layout.addStretch()
-
-        scroll = QScrollArea()
-        scroll.setObjectName("PanelScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(panel)
-        scroll.setMinimumWidth(300)
-
-        result_box = QGroupBox("Result")
-        result_layout = QVBoxLayout(result_box)
-        result_layout.setContentsMargins(16, 16, 16, 16)
-        result_layout.setSpacing(12)
-
-        self.result_label = QLabel(
-            "Describe what you want and press Generate."
-            if GENERATION_AVAILABLE else
-            "Image generation isn't set up yet — see the panel on the left."
-        )
-        self.result_label.setObjectName("PreviewBox")
-        self.result_label.setAlignment(Qt.AlignCenter)
-        self.result_label.setMinimumHeight(360)
-        result_layout.addWidget(self.result_label, 1)
-
-        self.progress = QProgressBar()
-        self.progress.setObjectName("NiceProgressBar")
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(10)
-        self.progress.setVisible(False)
-        result_layout.addWidget(self.progress)
-
-        self.status_label = QLabel(f"Runs on: {generation_device_description()}")
-        self.status_label.setObjectName("MutedLabel")
-        self.status_label.setWordWrap(True)
-        result_layout.addWidget(self.status_label)
-
-        actions = QHBoxLayout()
-        actions.setSpacing(10)
-        self.save_button = QPushButton("Save Image…")
-        self.save_button.setObjectName("ConvertButton")
-        self.save_button.setCursor(Qt.PointingHandCursor)
-        self.save_button.clicked.connect(self.save_result)
-        actions.addWidget(self.save_button)
-
-        self.use_as_reference_button = QPushButton("Use as reference")
-        self.use_as_reference_button.setCursor(Qt.PointingHandCursor)
-        self.use_as_reference_button.setToolTip(
-            "Feeds this result back in as a starting image, so you can nudge "
-            "it with another prompt."
-        )
-        self.use_as_reference_button.clicked.connect(self.use_result_as_reference)
-        actions.addWidget(self.use_as_reference_button)
-
-        self.send_to_remover_button = QPushButton("Remove background")
-        self.send_to_remover_button.setCursor(Qt.PointingHandCursor)
-        self.send_to_remover_button.setToolTip("Opens this result in the Background Remover")
-        self.send_to_remover_button.clicked.connect(self.send_result_to_remover)
-        actions.addWidget(self.send_to_remover_button)
-        actions.addStretch()
-        result_layout.addLayout(actions)
-
-        # A draggable divider rather than a fixed-width panel, so the
-        # description side and the result side can each be given as much
-        # room as the job needs.
-        self.splitter = GripSplitter(Qt.Horizontal)
-        self.splitter.setObjectName("BrowserSplitter")
-        self.splitter.setHandleWidth(14)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.addWidget(scroll)
-        self.splitter.addWidget(result_box)
-        self.splitter.setStretchFactor(0, 0)
-        self.splitter.setStretchFactor(1, 1)
-        result_box.setMinimumWidth(300)
-        root.addWidget(self.splitter, 1)
-        self._sized_splitter = False
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        # Give the controls a comfortable starting width the first time,
-        # then leave wherever the user drags the divider alone.
-        if not self._sized_splitter and self.splitter.width() > 100:
-            self._sized_splitter = True
-            total = self.splitter.width()
-            # Start wide enough to read the panel without scrolling - the
-            # install commands are long - but never take more than half.
-            wanted = self.splitter.widget(0).widget().sizeHint().width() + 28
-            panel = min(max(340, wanted), max(340, total // 2))
-            self.splitter.setSizes([panel, total - panel])
-
-    def _build_prompt_group(self):
-        box = QGroupBox("Describe the image")
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        self.prompt_edit = QPlainTextEdit()
-        self.prompt_edit.setPlaceholderText(
-            "A knight in weathered gold armour standing in heavy fog, "
-            "dramatic rim lighting, highly detailed"
-        )
-        self.prompt_edit.setFixedHeight(90)
-        layout.addWidget(self.prompt_edit)
-
-        negative_label = QLabel("Things to avoid (optional)")
-        negative_label.setObjectName("HintLabel")
-        layout.addWidget(negative_label)
-        self.negative_edit = QPlainTextEdit()
-        self.negative_edit.setPlaceholderText("blurry, extra fingers, watermark, text")
-        self.negative_edit.setFixedHeight(54)
-        layout.addWidget(self.negative_edit)
-
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        self.generate_button = QPushButton("Generate")
-        self.generate_button.setObjectName("ConvertButton")
-        self.generate_button.setCursor(Qt.PointingHandCursor)
-        self.generate_button.setMinimumHeight(40)
-        self.generate_button.clicked.connect(self.start_generation)
-        row.addWidget(self.generate_button, 2)
-        self.cancel_button = QPushButton("Stop")
-        self.cancel_button.setCursor(Qt.PointingHandCursor)
-        self.cancel_button.clicked.connect(self.cancel_generation)
-        self.cancel_button.setEnabled(False)
-        row.addWidget(self.cancel_button, 1)
-        layout.addLayout(row)
-
-        self.install_help = QLabel(generation_install_help())
-        self.install_help.setObjectName("HintLabel")
-        self.install_help.setWordWrap(True)
-        self.install_help.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.install_help.setVisible(not GENERATION_AVAILABLE)
-        layout.addWidget(self.install_help)
-
-        self.install_row = QWidget()
-        install_row = QHBoxLayout(self.install_row)
-        install_row.setContentsMargins(0, 0, 0, 0)
-        install_row.setSpacing(8)
-        copy_button = QPushButton("Copy install command for this Python")
-        copy_button.setObjectName("ChipButton")
-        copy_button.setCursor(Qt.PointingHandCursor)
-        copy_button.clicked.connect(self.copy_install_command)
-        install_row.addWidget(copy_button)
-        open_button = QPushButton("Open PyTorch's picker")
-        open_button.setObjectName("ChipButton")
-        open_button.setCursor(Qt.PointingHandCursor)
-        open_button.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(TORCH_SELECTOR_URL))
-        )
-        install_row.addWidget(open_button)
-        recheck_button = QPushButton("Check again")
-        recheck_button.setObjectName("ChipButton")
-        recheck_button.setCursor(Qt.PointingHandCursor)
-        recheck_button.clicked.connect(self.recheck_backend)
-        install_row.addWidget(recheck_button)
-        diagnostics_button = QPushButton("Why isn't it working?")
-        diagnostics_button.setObjectName("ChipButton")
-        diagnostics_button.setCursor(Qt.PointingHandCursor)
-        diagnostics_button.clicked.connect(self.show_diagnostics)
-        install_row.addWidget(diagnostics_button)
-        install_row.addStretch()
-        self.install_row.setVisible(not GENERATION_AVAILABLE)
-        layout.addWidget(self.install_row)
-        return box
-
-    def copy_install_command(self):
-        QApplication.clipboard().setText(generation_install_command())
-        self.status_label.setText(
-            "Copied — paste it into Command Prompt. It installs into the "
-            "Python this app is using."
-        )
-
-    def show_diagnostics(self):
-        box = QMessageBox(self)
-        box.setWindowTitle("Image generation diagnostics")
-        box.setIcon(QMessageBox.Information)
-        box.setText(
-            "Here's what the app can see. The usual reason pip says "
-            "\"already satisfied\" while the app disagrees is that the "
-            "packages went into a different Python."
-        )
-        box.setDetailedText(generation_diagnostics())
-        copy_button = box.addButton("Copy details", QMessageBox.ActionRole)
-        box.addButton(QMessageBox.Close)
-        box.exec()
-        if box.clickedButton() is copy_button:
-            QApplication.clipboard().setText(generation_diagnostics())
-
-    def recheck_backend(self):
-        if refresh_generation_backend():
-            self.install_help.setVisible(False)
-            self.install_row.setVisible(False)
-            self.result_label.setText("Describe what you want and press Generate.")
-            self.status_label.setText(f"Ready — runs on: {generation_device_description()}")
-        else:
-            missing = []
-            if not TORCH_AVAILABLE:
-                missing.append("PyTorch")
-            if not DIFFUSERS_AVAILABLE:
-                missing.append("diffusers")
-            self.install_help.setText(generation_install_help())
-            broken = TORCH_IMPORT_ERROR or DIFFUSERS_IMPORT_ERROR
-            if broken and "No module named" not in broken:
-                # Installed, but it won't load - a different problem entirely.
-                self.status_label.setText(
-                    f"Installed but failing to load: {broken[:80]} — "
-                    "press \"Why isn't it working?\" for the details."
-                )
-            else:
-                self.status_label.setText("Still missing: " + " and ".join(missing))
-        self._update_controls()
-
-    def _build_reference_group(self):
-        box = QGroupBox("Reference images (optional)")
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        self.reference_list = ReferenceList()
-        layout.addWidget(self.reference_list)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        add_button = QPushButton("Add…")
-        add_button.setObjectName("ChipButton")
-        add_button.setCursor(Qt.PointingHandCursor)
-        add_button.clicked.connect(self.add_references)
-        row.addWidget(add_button)
-        remove_button = QPushButton("Remove")
-        remove_button.setObjectName("ChipButton")
-        remove_button.setCursor(Qt.PointingHandCursor)
-        remove_button.clicked.connect(self.reference_list.remove_selected)
-        row.addWidget(remove_button)
-        clear_button = QPushButton("Clear")
-        clear_button.setObjectName("ChipButton")
-        clear_button.setCursor(Qt.PointingHandCursor)
-        clear_button.clicked.connect(self.reference_list.clear_all)
-        row.addWidget(clear_button)
-        row.addStretch()
-        layout.addLayout(row)
-
-        strength_row = QHBoxLayout()
-        strength_row.setSpacing(10)
-        strength_row.addWidget(QLabel("How much to change"))
-        self.strength_slider = QSlider(Qt.Horizontal)
-        self.strength_slider.setRange(10, 100)
-        self.strength_slider.setValue(65)
-        self.strength_slider.setToolTip(
-            "Low: stays close to the reference. High: treats it as a loose "
-            "starting point and follows the description more."
-        )
-        strength_row.addWidget(self.strength_slider, 1)
-        self.strength_label = QLabel("65%")
-        self.strength_label.setMinimumWidth(44)
-        self.strength_label.setAlignment(Qt.AlignCenter)
-        strength_row.addWidget(self.strength_label)
-        self.strength_slider.valueChanged.connect(
-            lambda value: self.strength_label.setText(f"{value}%")
-        )
-        layout.addLayout(strength_row)
-
-        hint = QLabel(
-            "Drop images here or use Add. Several references are cropped to "
-            "the output shape and averaged into one starting picture, so they "
-            "blend together. Leave this empty to work from the description alone."
-        )
-        hint.setObjectName("HintLabel")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        return box
-
-    def _build_settings_group(self):
-        box = QGroupBox("Settings")
-        grid = QGridLayout(box)
-        grid.setContentsMargins(16, 16, 16, 16)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-
-        grid.addWidget(QLabel("Model"), 0, 0)
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(list(GENERATION_MODELS))
-        self.model_combo.setToolTip(
-            "Downloaded once, then kept on this PC and used offline."
-        )
-        # Without this the longest entry would decide the panel's width.
-        self.model_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.model_combo.setMinimumContentsLength(16)
-        self.model_combo.currentTextChanged.connect(self._model_changed)
-        grid.addWidget(self.model_combo, 0, 1, 1, 3)
-
-        self.custom_model_edit = QLineEdit()
-        self.custom_model_edit.setPlaceholderText(
-            "e.g. black-forest-labs/FLUX.1-schnell, or a folder on this PC"
-        )
-        self.custom_model_edit.setVisible(False)
-        grid.addWidget(self.custom_model_edit, 1, 0, 1, 4)
-
-        self.model_note = QLabel("")
-        self.model_note.setObjectName("HintLabel")
-        self.model_note.setWordWrap(True)
-        grid.addWidget(self.model_note, 6, 0, 1, 4)
-
-        grid.addWidget(QLabel("Size"), 2, 0)
-        self.size_combo = QComboBox()
-        self.size_combo.addItems(GENERATION_SIZES)
-        grid.addWidget(self.size_combo, 2, 1, 1, 3)
-
-        grid.addWidget(QLabel("Steps"), 3, 0)
-        self.steps_spin = QSpinBox()
-        self.steps_spin.setRange(1, 100)
-        self.steps_spin.setValue(25)
-        self.steps_spin.setToolTip("More steps: slower, usually a bit cleaner.")
-        grid.addWidget(self.steps_spin, 3, 1)
-
-        grid.addWidget(QLabel("Guidance"), 3, 2)
-        self.guidance_spin = QSpinBox()
-        self.guidance_spin.setRange(0, 20)
-        self.guidance_spin.setValue(7)
-        self.guidance_spin.setToolTip(
-            "How strictly to follow the description. Turbo models want 0-2."
-        )
-        grid.addWidget(self.guidance_spin, 3, 3)
-
-        grid.addWidget(QLabel("HF token"), 4, 0)
-        self.token_edit = QLineEdit()
-        self.token_edit.setEchoMode(QLineEdit.Password)
-        self.token_edit.setPlaceholderText("needed for FLUX.1 and SD 3.5")
-        self.token_edit.setToolTip(
-            "Some models are behind a licence you accept on their page, and "
-            "then need an access token to download.\n"
-            "Create one at huggingface.co/settings/tokens - read access is enough."
-        )
-        self.token_edit.setText(QSettings(SETTINGS_ORG, SETTINGS_APP)
-                                .value("hf_token", "") or "")
-        self.token_edit.editingFinished.connect(self._save_token)
-        grid.addWidget(self.token_edit, 4, 1, 1, 3)
-
-        grid.addWidget(QLabel("Seed"), 5, 0)
-        self.seed_spin = QSpinBox()
-        self.seed_spin.setRange(-1, 2_147_483_647)
-        self.seed_spin.setValue(-1)
-        self.seed_spin.setToolTip("-1 picks a new random seed each time.")
-        grid.addWidget(self.seed_spin, 5, 1)
-        self.reuse_seed_button = QPushButton("Reuse last")
-        self.reuse_seed_button.setObjectName("ChipButton")
-        self.reuse_seed_button.setCursor(Qt.PointingHandCursor)
-        self.reuse_seed_button.setToolTip(
-            "Puts the last result's seed back, so you can tweak the wording "
-            "and get a similar picture."
-        )
-        self.reuse_seed_button.clicked.connect(self.reuse_last_seed)
-        self.reuse_seed_button.setEnabled(False)
-        grid.addWidget(self.reuse_seed_button, 5, 2, 1, 2)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
-        self._model_changed(self.model_combo.currentText())
-        return box
-
-    def _save_token(self):
-        QSettings(SETTINGS_ORG, SETTINGS_APP).setValue(
-            "hf_token", self.token_edit.text().strip())
-
-    def _model_changed(self, label):
-        model = GENERATION_MODELS[label]
-        self.custom_model_edit.setVisible(model["id"] == "")
-        self.model_note.setText(model.get("note", ""))
-        # Each model has its own sensible starting point - turbo and FLUX
-        # schnell want very few steps and little or no guidance.
-        self.steps_spin.setValue(model["steps"])
-        self.guidance_spin.setValue(model["guidance"])
-        for index, text in enumerate(GENERATION_SIZES):
-            if text.startswith(f"{model['size']} × {model['size']}"):
-                self.size_combo.setCurrentIndex(index)
-                break
-
-    def _selected_model(self):
-        """(model id, family) for whatever is picked, custom included."""
-        model = GENERATION_MODELS[self.model_combo.currentText()]
-        model_id = model["id"] or self.custom_model_edit.text().strip()
-        return model_id, model["family"]
-
-    # -- helpers ---------------------------------------------------------------
-
-    def _selected_size(self):
-        text = self.size_combo.currentText().split("(")[0]
-        width, height = text.replace("×", "x").split("x")
-        return int(width.strip()), int(height.strip())
-
-    def _update_controls(self):
-        can_generate = GENERATION_AVAILABLE and not self.busy
-        self.generate_button.setEnabled(can_generate)
-        self.cancel_button.setEnabled(self.busy)
-        for widget in (self.save_button, self.use_as_reference_button,
-                       self.send_to_remover_button):
-            widget.setEnabled(self.result is not None and not self.busy)
-
-    def add_references(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Add reference images", "", WEB_IMAGE_FILTER
-        )
-        for path in paths:
-            self.reference_list.add_path(path)
-
-    # -- generating ------------------------------------------------------------
-
-    def start_generation(self):
-        if self.busy or not GENERATION_AVAILABLE:
-            return
-        prompt = self.prompt_edit.toPlainText().strip()
-        if not prompt:
-            QMessageBox.information(
-                self, "Describe the image first",
-                "Type a description of the picture you'd like."
-            )
-            return
-
-        size = self._selected_size()
-        references = self.reference_list.images()
-        seed = self.seed_spin.value()
-        if seed < 0:
-            seed = int.from_bytes(os.urandom(4), "big") % 2_147_483_647
-
-        model_id, family = self._selected_model()
-        if not model_id:
-            QMessageBox.information(
-                self, "Which model?",
-                "Type the name of a Hugging Face model, or the folder it's in."
-            )
-            return
-
-        request = {
-            "model_id": model_id,
-            "family": family,
-            "prompt": prompt,
-            "negative_prompt": self.negative_edit.toPlainText().strip(),
-            "steps": self.steps_spin.value(),
-            "guidance": float(self.guidance_spin.value()),
-            "size": size,
-            "seed": seed,
-            "strength": self.strength_slider.value() / 100,
-            "init_image": blend_reference_images(references, size),
-        }
-
-        self.busy = True
-        self._update_controls()
-        self.progress.setRange(0, request["steps"])
-        self.progress.setValue(0)
-        self.progress.setVisible(True)
-        self.status_label.setText("Starting…")
-
-        self.worker = GenerationWorker(request)
-        self.worker.signals.progress.connect(self._on_progress)
-        self.worker.signals.status.connect(self.status_label.setText)
-        self.worker.signals.finished.connect(self._on_finished)
-        self.worker.signals.failed.connect(self._on_failed)
-        self.worker.signals.cancelled.connect(self._on_cancelled)
-        self.main_window.thread_pool.start(self.worker)
-
-    def cancel_generation(self):
-        if self.worker is not None:
-            self.worker.cancel()
-            self.status_label.setText("Stopping after this step…")
-
-    def _on_progress(self, step, total):
-        self.progress.setRange(0, total)
-        self.progress.setValue(step)
-        self.status_label.setText(f"Generating… step {step} of {total}")
-
-    def _finish(self):
-        self.busy = False
-        self.worker = None
-        self.progress.setVisible(False)
-        self._update_controls()
-
-    def _on_finished(self, image, seed):
-        self.result = image.convert("RGBA")
-        self.last_seed = seed
-        self.reuse_seed_button.setEnabled(True)
-        self._finish()
-        self.show_result()
-        self.status_label.setText(
-            f"Done — {self.result.width} × {self.result.height}, seed {seed}."
-        )
-
-    def _on_failed(self, error_message):
-        self._finish()
-        self.status_label.setText("Generation failed.")
-        model_id, _family = self._selected_model()
-        show_error(self, "Generation failed",
-                   explain_model_error(error_message, model_id),
-                   details=error_message)
-
-    def _on_cancelled(self):
-        self._finish()
-        self.status_label.setText("Stopped.")
-
-    def show_result(self):
-        if self.result is None:
-            return
-        preview = self.result.copy()
-        preview.thumbnail((self.result_label.width() - 20,
-                           self.result_label.height() - 20), RESAMPLE_LANCZOS)
-        self.result_label.setPixmap(QPixmap.fromImage(pil_to_qimage(preview)))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.show_result()
-
-    def reuse_last_seed(self):
-        if getattr(self, "last_seed", None) is not None:
-            self.seed_spin.setValue(int(self.last_seed))
-
-    # -- what to do with the result --------------------------------------------
-
-    def save_result(self):
-        if self.result is None:
-            return
-        default = os.path.join(os.path.expanduser("~"), "generated.png")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save image", default, "PNG Image (*.png);;WebP Image (*.webp)"
-        )
-        if not path:
-            return
-        fmt = "webp" if path.lower().endswith(".webp") else "png"
-        if not path.lower().endswith("." + fmt):
-            path += "." + fmt
-        try:
-            _web_save_still(self.result, path, fmt)
-        except Exception as exc:  # noqa: BLE001
-            show_critical(self, "Save failed", str(exc))
-            return
-        self.status_label.setText(f"Saved {os.path.basename(path)}")
-
-    def _result_to_temp_file(self):
-        folder = os.path.join(tempfile.gettempdir(), "imagegen_generated")
-        os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, f"generated_{int(datetime.now().timestamp())}.png")
-        self.result.save(path, "PNG")
-        return path
-
-    def use_result_as_reference(self):
-        if self.result is None:
-            return
-        self.reference_list.add_path(self._result_to_temp_file())
-        self.status_label.setText("Added the result to the references.")
-
-    def send_result_to_remover(self):
-        if self.result is None:
-            return
-        remover = getattr(self.main_window, "background_tab", None)
-        if remover is None or not hasattr(remover, "load_image_from_path"):
-            QMessageBox.information(
-                self, "Background Remover unavailable",
-                "That tab needs NumPy installed to work."
-            )
-            return
-        remover.load_image_from_path(self._result_to_temp_file())
-        self.main_window.show_tab(remover)
-
-
 class EdgeResizeGrip(QWidget):
     """An invisible strip along one edge or corner of a frameless window
     that resizes it when dragged.
@@ -10921,13 +9724,6 @@ EXTENSION_CATALOGUE = {
         "size_mb": 60,
         "description": "AI cutouts, magic wand and brushes.",
     },
-    "image_creation": {
-        "name": "Image Creation",
-        "asset": "extension_imagegen.zip",
-        "size_mb": 2600,
-        "description": "Generate images locally from a description. The big "
-                       "one - it brings in PyTorch.",
-    },
 }
 
 
@@ -10947,7 +9743,6 @@ EXTENSION_BUILT_IN = {
     "video_tools": lambda: MOVIEPY_AVAILABLE,
     "flipbook": lambda: NUMPY_AVAILABLE,
     "background_remover": lambda: ONNX_AVAILABLE,
-    "image_creation": lambda: GENERATION_AVAILABLE,
 }
 
 
@@ -11279,7 +10074,6 @@ class HomeTab(QWidget):
         ("Web Images", "Collect images from any webpage."),
         ("WebP Flipbook", "Sprite sheets and animated WebP to GIF."),
         ("Background Remover", "Cut out people and characters."),
-        ("Image Creation", "Generate images from a description."),
     ]
 
     def __init__(self, main_window, parent=None):
@@ -11518,16 +10312,19 @@ class UpdateCheckWorker(QRunnable):
                 return
 
             if _parse_version(latest_tag) > _parse_version(APP_VERSION):
-                # Find the app .exe among the release's files, so the
-                # updater can fetch it directly instead of sending the
-                # user to a web page.
+                # Find the app among the release's files, so the updater can
+                # fetch it directly instead of sending the user to a web
+                # page. The zipped app folder is preferred; a single .exe is
+                # what older releases have.
                 download_url = ""
                 for asset in data.get("assets", []):
                     name = (asset.get("name") or "").lower()
-                    if name.endswith(".exe") and "setup" not in name and \
-                            "updater" not in name:
+                    if name == f"{APP_TITLE.lower()}.zip":
                         download_url = asset.get("browser_download_url", "")
                         break
+                    if not download_url and name.endswith(".exe") and \
+                            "setup" not in name and "updater" not in name:
+                        download_url = asset.get("browser_download_url", "")
                 self.signals.update_available.emit({
                     "version": latest_tag,
                     "download_url": download_url,
@@ -11856,7 +10653,6 @@ class MainWindow(QMainWindow):
             BackgroundRemoverTab(self) if NUMPY_AVAILABLE
             else BackgroundRemoverUnavailableTab(self)
         )
-        self.image_creation_tab = ImageCreationTab(self)
 
         # The original tool tabs get the shared spacing pass; the Images,
         # Web Images and Flipbook tabs are laid out by hand already.
@@ -11876,7 +10672,6 @@ class MainWindow(QMainWindow):
             (self.web_images_tab, "Web Images"),
             (self.flipbook_tab, "WebP Flipbook"),
             (self.background_tab, "Background Remover"),
-            (self.image_creation_tab, "Image Creation"),
         )
         # Tools whose component wasn't installed become a greyed-out tab
         # explaining how to add them, rather than vanishing.
@@ -11919,7 +10714,7 @@ class MainWindow(QMainWindow):
         titles = [
             "Home", "Images", "Video to GIF", "GIF Optimiser", "Image Optimiser",
             "WebP to GIF", "Video to Image", "Web Images", "WebP Flipbook",
-            "Background Remover", "Image Creation",
+            "Background Remover",
         ]
         button_group = QButtonGroup(container)
         button_group.setExclusive(True)

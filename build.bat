@@ -119,46 +119,22 @@ if exist "FClogo.png" set ADD_DATA_ARGS=%ADD_DATA_ARGS% --add-data "FClogo.png;.
 if exist "FClogo.ico" set ADD_DATA_ARGS=%ADD_DATA_ARGS% --add-data "FClogo.ico;."
 
 echo.
-echo Checking for the optional Image Creation packages...
-set ML_ARGS=
-python -c "import torch, diffusers" 2>nul
-if errorlevel 1 (
-    echo Image generation packages not installed - that tab will show
-    echo install instructions instead. This is fine: they add several GB
-    echo to the build, so only install them if you want that tab.
-) else (
-    echo torch + diffusers found - bundling image generation.
-    echo Including their package metadata, which diffusers and transformers
-    echo read at import time. Without this the built exe fails with
-    echo "No package metadata was found for ...".
-    set ML_ARGS=--collect-all diffusers --collect-all transformers --collect-all safetensors --recursive-copy-metadata diffusers --recursive-copy-metadata transformers --recursive-copy-metadata torch --recursive-copy-metadata accelerate --recursive-copy-metadata huggingface-hub --copy-metadata requests --copy-metadata numpy --copy-metadata packaging --copy-metadata filelock --copy-metadata tqdm --copy-metadata regex --copy-metadata pyyaml
-)
-
-python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>nul
-if errorlevel 1 (
-    echo.
-    echo NOTE: the PyTorch installed here has no CUDA support, so image
-    echo generation will run on the CPU - minutes per image. For GPU speed,
-    echo reinstall it from a CUDA index, e.g.
-    echo     pip uninstall torch -y
-    echo     pip install torch --index-url https://download.pytorch.org/whl/cu126
-)
-
-echo.
 echo Cleaning up previous build folders...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist "%APP_NAME%.spec" del /q "%APP_NAME%.spec"
 
 echo.
-echo Building "%APP_NAME%.exe" ...
-echo (This takes longer than before - the embedded browser is large.)
+echo Building "%APP_NAME%" ...
+echo It's built as a folder rather than one big .exe: a single .exe has to
+echo unpack itself into a temp folder every time it starts, which is what
+echo made the app take 20-40 seconds to open.
 echo.
 
 echo Icon argument: %ICON_ARG%
 echo.
 
-python -m PyInstaller --onefile --windowed --clean --noconfirm --name "%APP_NAME%" ^
+python -m PyInstaller --onedir --windowed --clean --noconfirm --name "%APP_NAME%" ^
     --collect-all rawpy ^
     --collect-all pillow_heif ^
     --collect-all moviepy ^
@@ -173,7 +149,6 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --name "%APP_NAME
     --hidden-import PyQt6.QtWebEngineCore ^
     --hidden-import PyQt6.sip ^
     --collect-all onnxruntime ^
-    %ML_ARGS% ^
     %ADD_DATA_ARGS% ^
     %ICON_ARG% ^
     "%SCRIPT_NAME%"
@@ -186,9 +161,19 @@ if errorlevel 1 (
 )
 
 echo.
+echo Packing the app folder into dist\%APP_NAME%.zip for the release...
+python zip_app.py
+if errorlevel 1 (
+    echo WARNING: couldn't make the .zip - the app folder itself is fine.
+)
+
+echo.
 echo ============================================================
 echo  Build complete!
-echo  Your exe is here: dist\%APP_NAME%.exe
+echo  Run it from here:   dist\%APP_NAME%\%APP_NAME%.exe
+echo  Keep the whole dist\%APP_NAME% folder together - the .exe
+echo  needs the _internal folder next to it.
+echo  For a GitHub release, upload dist\%APP_NAME%.zip
 echo ============================================================
 echo.
 echo Refreshing the Windows icon cache so the new icon shows without

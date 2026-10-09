@@ -41,7 +41,7 @@ echo  Built:
 echo    dist\ImageGenSetup.exe    - the installer
 echo    dist\ImageGenUpdater.exe  - the updater
 echo.
-echo  Upload BOTH to the GitHub release, along with ImageGen.exe
+echo  Upload BOTH to the GitHub release, along with ImageGen.zip
 echo  from build.bat. The updater must sit next to ImageGen.exe
 echo  once installed, or the app will fall back to opening the
 echo  download page instead of updating itself.

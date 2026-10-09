@@ -1,15 +1,17 @@
 # Builds ImageGen on GitHub's own Windows machines and attaches the results
 # to a release - so you don't have to build or upload anything by hand.
 #
-# How to use it:
-#   1. Set APP_VERSION in image_to_png_converter.py (e.g. 1.10.0)
-#   2. git tag v1.10.0 && git push origin v1.10.0
-#   3. Watch the Actions tab. When it finishes, the release exists with the
-#      .exe files attached, and the app starts offering the update.
+# How to use it - either way, no command line needed for the first:
+#   A. On github.com: Actions tab -> "Build and release" -> Run workflow.
+#      It reads APP_VERSION from image_to_png_converter.py and makes the
+#      release v<that version> itself.
+#   B. Or from a terminal: git tag v1.13.0 && git push origin v1.13.0
+#      (the tag has to match APP_VERSION).
+#   Then watch the Actions tab. When it finishes, the release exists with the
+#      app (ImageGen.zip), installer and updater attached, and the app starts
+#      offering the update.
 #
-# Building here takes roughly 10-15 minutes. It does NOT include the image
-# generation libraries (PyTorch is far too big for a runner), so that tool
-# ships as an extension.
+# Building here takes roughly 10-15 minutes.
 
 name: Build and release
 
@@ -22,45 +24,59 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write        # needed to create the release and attach files
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"     # 3.13+ has no wheels for some of these
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PyQt6 PyQt6-WebEngine Pillow pillow-heif pillow-avif-plugin
+          pip install PyQt6 PyQt6-WebEngine Pillow pillow-heif pillow-avif-plugin rawpy
           pip install numpy onnxruntime requests moviepy imageio-ffmpeg
           pip install pyinstaller
 
-      - name: Check the tag matches APP_VERSION
+      - name: Work out the version
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           APP=$(grep -oP 'APP_VERSION = "\K[^"]+' image_to_png_converter.py)
-          echo "tag=$TAG  app=$APP"
-          if [ "$TAG" != "$APP" ]; then
-            echo "::error::Tag $TAG doesn't match APP_VERSION $APP - the update"
-            echo "::error::check compares these, so they have to agree."
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            echo "tag=$TAG  app=$APP"
+            if [ "$TAG" != "$APP" ]; then
+              echo "::error::Tag $TAG doesn't match APP_VERSION $APP - the update"
+              echo "::error::check compares these, so they have to agree."
+              exit 1
+            fi
+          else
+            echo "Run by hand - releasing APP_VERSION $APP as v$APP"
           fi
+          echo "RELEASE_TAG=v$APP" >> "$GITHUB_ENV"
 
       - name: Build the app
         run: |
           python prepare_icon.py
-          python -m PyInstaller --onefile --windowed --clean --noconfirm `
+          python -m PyInstaller --onedir --windowed --clean --noconfirm `
             --name ImageGen `
-            --collect-all pillow_heif --collect-all PIL `
+            --collect-all rawpy --collect-all pillow_heif `
+            --collect-all moviepy --collect-all imageio_ffmpeg `
+            --collect-all imageio --collect-all proglog `
+            --collect-all decorator --collect-all PIL `
+            --collect-all pillow_avif --collect-all onnxruntime `
+            --hidden-import moviepy.editor `
             --hidden-import PyQt6.QtWebEngineWidgets `
             --hidden-import PyQt6.QtWebEngineCore `
+            --hidden-import PyQt6.sip `
             --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
             --icon app_icon.ico `
             image_to_png_converter.py
+          python zip_app.py
 
       - name: Build the installer and updater
         run: |
@@ -80,8 +96,10 @@ jobs:
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: |
-            dist/ImageGen.exe
+            dist/ImageGen.zip
             dist/ImageGenSetup.exe
             dist/ImageGenUpdater.exe
             dist/extension_*.zip

@@ -152,7 +152,10 @@ class UpdateWorker(QRunnable):
         return destination
 
     def replace_app(self, downloaded, target):
-        """Swaps the new exe in, keeping the old one until it's done."""
+        """Swaps the new version in, keeping the old one until it's done."""
+        if zipfile.is_zipfile(downloaded):
+            self.replace_app_folder(downloaded, target)
+            return
         self.signals.status.emit("Installing…")
         backup = target + ".old"
         if os.path.exists(backup):
@@ -171,6 +174,53 @@ class UpdateWorker(QRunnable):
                 os.remove(backup)
             except OSError:
                 pass  # tidied up next time; the update itself worked
+
+    def replace_app_folder(self, downloaded, target):
+        """Installs a zipped app folder (ImageGen.exe plus _internal/).
+
+        Unpacks it beside the install first, then swaps each top-level item
+        over, moving the old ones aside. If anything goes wrong part way,
+        the old ones are put back, so the working version survives.
+        """
+        folder = os.path.dirname(os.path.abspath(target))
+        staging = os.path.join(folder, f".{APP_NAME}_update_new")
+        backup = os.path.join(folder, f".{APP_NAME}_update_old")
+        for leftover in (staging, backup):
+            shutil.rmtree(leftover, ignore_errors=True)
+
+        self.signals.status.emit("Unpacking…")
+        with zipfile.ZipFile(downloaded) as archive:
+            archive.extractall(staging)
+        os.remove(downloaded)
+        if not os.path.isfile(os.path.join(staging, os.path.basename(target))):
+            shutil.rmtree(staging, ignore_errors=True)
+            raise RuntimeError(
+                f"The download doesn't contain {os.path.basename(target)}.")
+
+        self.signals.status.emit("Installing…")
+        os.makedirs(backup)
+        moved = []
+        try:
+            for name in os.listdir(staging):
+                current = os.path.join(folder, name)
+                if os.path.exists(current):
+                    os.replace(current, os.path.join(backup, name))
+                    moved.append(name)
+                shutil.move(os.path.join(staging, name), current)
+        except Exception:
+            for name in moved:
+                current = os.path.join(folder, name)
+                if os.path.isdir(current):
+                    shutil.rmtree(current, ignore_errors=True)
+                elif os.path.exists(current):
+                    os.remove(current)
+                os.replace(os.path.join(backup, name), current)
+            shutil.rmtree(backup, ignore_errors=True)
+            raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        # Tidied up next time if something still has a file open.
+        shutil.rmtree(backup, ignore_errors=True)
 
     def replace_component(self, downloaded, folder, name, version):
         self.signals.status.emit(f"Updating {name}…")

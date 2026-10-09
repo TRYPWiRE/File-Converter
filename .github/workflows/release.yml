@@ -59,9 +59,21 @@ jobs:
           fi
           echo "RELEASE_TAG=v$APP" >> "$GITHUB_ENV"
 
+      - name: Pick the icon
+        shell: bash
+        run: |
+          # prepare_icon.py prints the icon to use (usually iGlogo.ico, or
+          # app_icon.ico if it had to make one) - the same as build.bat.
+          ICON=$(python prepare_icon.py | tail -n 1 | tr -d '\r')
+          if [ -z "$ICON" ] || [ ! -f "$ICON" ]; then
+            echo "::error::prepare_icon.py didn't find a usable icon."
+            exit 1
+          fi
+          echo "Using icon: $ICON"
+          echo "APP_ICON=$ICON" >> "$GITHUB_ENV"
+
       - name: Build the app
         run: |
-          python prepare_icon.py
           python -m PyInstaller --onedir --windowed --clean --noconfirm `
             --name ImageGen `
             --collect-all rawpy --collect-all pillow_heif `
@@ -74,20 +86,24 @@ jobs:
             --hidden-import PyQt6.QtWebEngineCore `
             --hidden-import PyQt6.sip `
             --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
-            --icon app_icon.ico `
+            --icon "$env:APP_ICON" `
             image_to_png_converter.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python zip_app.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build the installer and updater
         run: |
           python -m PyInstaller --onefile --windowed --clean --noconfirm `
             --name ImageGenSetup `
             --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
-            --icon app_icon.ico installer.py
+            --icon "$env:APP_ICON" installer.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m PyInstaller --onefile --windowed --clean --noconfirm `
             --name ImageGenUpdater `
             --add-data "iGlogo.png;." --add-data "iGlogo.ico;." `
-            --icon app_icon.ico updater.py
+            --icon "$env:APP_ICON" updater.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build the extensions
         run: python build_extensions.py

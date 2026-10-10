@@ -1,4 +1,4 @@
-# File Converter — by Tryppy
+# File Converter
 
 A lightweight desktop app for converting images and video into more convenient formats — with a clean, macOS-inspired interface (light and dark modes), background processing so your PC doesn't get bogged down, and a couple of nice quality-of-life touches most simple converters skip.
 
